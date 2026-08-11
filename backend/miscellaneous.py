@@ -194,6 +194,42 @@ def get_player_owner(player_stats: dict, league_id: str) -> dict:
     return None
 
 
+def market_value_deltas(market_value_history: list) -> dict:
+    """### Work out how much a player's market value moved over the usual periods.
+
+    The history is oldest first, one entry per day, so the last entry is today.
+
+    Any delta the history is too short to cover is None rather than an error: a player
+    who was only recently added to the competition has just a handful of entries, and
+    indexing past the start of the list would kill the whole run.
+
+    The key names are the ones the frontend already reads in
+    "MarketValueChangesTable.js". The two "Avg" keys are differences over the period,
+    not averages, but renaming them is a frontend change for no gain.
+
+    Args:
+        market_value_history (list): A player_marketvalue response, each entry with "mv".
+
+    Returns:
+        dict: today, yesterday, twoDays, sevenDaysAvg and thirtyDaysAvg.
+    """
+    history = market_value_history or []
+
+    def delta(newer: int, older: int):
+        ### Both indices count back from the end, so the older one decides the length needed
+        if len(history) < abs(older):
+            return None
+        return history[newer]["mv"] - history[older]["mv"]
+
+    return {
+        "today": delta(-1, -2),
+        "yesterday": delta(-2, -3),
+        "twoDays": delta(-3, -4),
+        "sevenDaysAvg": delta(-1, -8),
+        "thirtyDaysAvg": delta(-1, -31),
+    }
+
+
 def get_start_datetime() -> datetime:
     """### Parse the START_DATE environment variable.
 

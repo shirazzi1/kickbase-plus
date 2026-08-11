@@ -156,6 +156,10 @@ def player_statistics(token: str, league_id: str, player_id: str):
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
+        ### The status note ("stxt") is the only prose in this response and defaults to
+        ### English. The frontend is German, so ask for German. Kickbase localises on this
+        ### header only: a "lang"/"locale" query parameter is ignored.
+        "Accept-Language": "de-DE,de;q=0.9",
         "Cookie": f"kkstrauth={token};",
     }
 

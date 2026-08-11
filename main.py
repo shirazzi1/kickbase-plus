@@ -6,7 +6,7 @@ from os import getenv, makedirs, path
 from art import tprint
 from sys import stdout
 from logging.config import dictConfig
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from backend import exceptions, miscellaneous
 from backend.kickbase.v4 import competitions, user, leagues
@@ -101,12 +101,12 @@ def main() -> None:
     leagues.clear_caches()
 
     try:
-        selected_league, user_token = login()
+        selected_league, user_token, own_user_id = login()
 
         ### Get the daily login gift in every available league
         get_gift(user_token)
 
-        market(user_token, selected_league)
+        market(user_token, selected_league, own_user_id)
         market_value_changes(user_token, selected_league)
 
         taken_free_players(user_token, selected_league)
@@ -138,6 +138,8 @@ def login() -> tuple:
         tuple: A tuple containing the following elements:
             -- selected_league (object): The league the user wants to get data from for the frontend.
             -- user_token (str): User token for authentication.
+            -- own_user_id (str): The logged in user's ID. market() needs it to tell the
+               user's own bids apart from anyone else's.
     """
     logging.info("Logging in...")
 
@@ -152,7 +154,7 @@ def login() -> tuple:
         exit()
     logging.info(f"Available leagues: {', '.join([league.name for league in league_list])}") # Print all available leagues the user is in
 
-    return select_league(league_list), user_token
+    return select_league(league_list), user_token, user_info.id
 
 
 def select_league(league_list: list) -> object:
@@ -207,55 +209,80 @@ def get_gift(user_token: str) -> None:
         logging.info("Gift has already been collected!")
 
 
-def market(user_token: str, selected_league: object) -> None:
+def market(user_token: str, selected_league: object, own_user_id: str) -> None:
     """### Retrieves all players listed on the transfer market.
+
+    Player and Kickbase listings go into one file, marked by "isFreeAgent". They are
+    the same decision for the user, so splitting them across two tables only meant
+    comparing rows between them.
+
+    Each row also carries the user's own bid, the status note from the player profile
+    and the daily market value deltas. The profile and market value history are both
+    cached per run and this function runs before market_value_changes(), which asks for
+    both for every player in the competition anyway, so this costs no extra API calls.
 
     Args:
         user_token (str): The user's kkstrauth token.
         selected_league (object): The league the user wants to get data from for the frontend.
+        own_user_id (str): The logged in user's ID, to identify their own bids.
     """
     logging.info("Getting players listed on transfer market...")
 
     ### Get all players on the market
     players_on_market = leagues.get_market(user_token, selected_league.id)
 
-    players_listed_by_user = []
-    players_listed_by_kickbase = []
+    players_on_the_market = []
 
     for player in players_on_market:
         if player.position not in miscellaneous.POSITIONS:
             logging.warning(f"Invalid position number: {player.position} for player {player.firstName} {player.lastName} (PID: {player.id})")
             player.position = 1 ### Default to "Torwart" (Goalkeeper)
-        
+
+        ### The status note only exists on the player profile, not on the market entry
+        player_stats = leagues.player_statistics(user_token, selected_league.id, player.id)
+        status_text = (player_stats.get("stxt") or "").strip() or None
+
+        deltas = miscellaneous.market_value_deltas(leagues.player_marketvalue(user_token, player.id))
+
+        own_bid = player.own_offer(own_user_id)
+
+        ### Kickbase only sends an expiry ("exs") for its own listings, never for player
+        ### ones, so that column stays empty for the latter. Written as ISO 8601 so it
+        ### sorts chronologically in the frontend, which a dd.mm.yyyy string does not.
+        if player.expiry is not None:
+            expiration = (datetime.now(timezone.utc) + timedelta(seconds=player.expiry)).isoformat()
+        else:
+            expiration = None
+
         player_info = {
             "teamId": player.teamId,
             "position": miscellaneous.POSITIONS[player.position],
-            "firstName": f"{player.firstName}", 
+            "firstName": f"{player.firstName}",
             "lastName": f"{player.lastName}",
-            "price": player.price,
             "status": player.status,
-            "trend": player.marketValueTrend,
-            "expiration": (datetime.now() + timedelta(seconds=player.expiry)).strftime('%d.%m.%Y %H:%M:%S') if player.expiry is not None else None,
+            "statusText": status_text,
+            "marketValue": player.marketValue,
+            "price": player.price,
+            "ownBid": own_bid,
+            "seller": player.username or "Kickbase",
+            "isFreeAgent": not player.username,
+            "expiration": expiration,
+            **deltas,
         }
-        
-        ### Check if player is listed by user or Kickbase
-        if not player.username:
-            players_listed_by_kickbase.append(player_info)
-            logging.debug(f"Player {player.firstName} {player.lastName} is listed by Kickbase!")
-        else:
-            player_info["seller"] = player.username
-            players_listed_by_user.append(player_info)
-            logging.debug(f"Player {player.firstName} {player.lastName} is listed by {player.username}!")
 
-    logging.info("Got all players listed on transfer market.")
+        players_on_the_market.append(player_info)
 
-    ### Save to file + timestamp
-    miscellaneous.write_json_to_file(players_listed_by_user, "market_user.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_market_user.json")
+        bid_note = f", own bid {own_bid}" if own_bid is not None else ""
+        logging.debug(f"Player {player.firstName} {player.lastName} is listed by {player_info['seller']}{bid_note}!")
+
+    free_agents = sum(1 for player in players_on_the_market if player["isFreeAgent"])
+    own_bids = sum(1 for player in players_on_the_market if player["ownBid"] is not None)
+    logging.info(f"Got all {len(players_on_the_market)} players listed on transfer market "
+                 f"({free_agents} listed by Kickbase, {own_bids} with a bid of yours).")
 
     ### Save to file + timestamp
-    miscellaneous.write_json_to_file(players_listed_by_kickbase, "market_kickbase.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_market_kickbase.json")
+    miscellaneous.write_json_to_file(players_on_the_market, "market.json")
+    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_market.json")
 
 
 def market_value_changes(user_token: str, selected_league: object) -> None:
@@ -310,11 +337,7 @@ def market_value_changes(user_token: str, selected_league: object) -> None:
                 "firstName": player_stats.get("fn", None), 
                 "lastName": player_stats["ln"], 
                 "marketValue": player_stats["mv"],
-                "today": player_marketvalue[-1]["mv"] - player_marketvalue[-2]["mv"],
-                "yesterday": player_marketvalue[-2]["mv"] - player_marketvalue[-3]["mv"],
-                "twoDays": player_marketvalue[-3]["mv"] - player_marketvalue[-4]["mv"],
-                "sevenDaysAvg": player_marketvalue[-1]["mv"] - player_marketvalue[-8]["mv"] if len(player_marketvalue) >= 8 else None,
-                "thirtyDaysAvg": player_marketvalue[-1]["mv"] - player_marketvalue[-31]["mv"] if len(player_marketvalue) >= 31 else None,
+                **miscellaneous.market_value_deltas(player_marketvalue),
                 "manager": manager,
             })
             logging.debug(f"Player {player_stats.get('fn', None)} {player_stats['ln']} has a market value of {player_stats['mv']} and is owned by {manager}.")
