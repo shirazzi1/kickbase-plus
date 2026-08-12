@@ -28,6 +28,7 @@ _player_statistics_cache = {}
 _player_marketvalue_cache = {}
 _transfers_cache = {}
 _user_stats_cache = {}
+_user_performance_cache = {}
 _battles_cache = {}
 
 
@@ -37,6 +38,7 @@ def clear_caches() -> None:
     _player_marketvalue_cache.clear()
     _transfers_cache.clear()
     _user_stats_cache.clear()
+    _user_performance_cache.clear()
     _battles_cache.clear()
 
     miscellaneous.clear_caches()
@@ -308,7 +310,14 @@ def user_stats(token: str, league_id: str, user_id: str) -> dict:
 def user_performance(token: str, league_id: str, user_id: str) -> dict:
     """
     Get the performance of a given user in the given league.
+
+    Cached per league and user for the duration of the run, like user_stats() next to it.
+    balances() asks for every manager, and nothing about a past matchday changes mid-run.
     """
+    cache_key = (league_id, str(user_id))
+    if cache_key in _user_performance_cache:
+        return _user_performance_cache[cache_key]
+
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/managers/{user_id}/performance"
     headers = {
         "Content-Type": "application/json",
@@ -321,7 +330,9 @@ def user_performance(token: str, league_id: str, user_id: str) -> dict:
         json_response = requests.get(url, headers=headers).json()
     except:
         raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") ### TODO: Change exception
-    
+
+    _user_performance_cache[cache_key] = json_response
+
     return json_response
 
 

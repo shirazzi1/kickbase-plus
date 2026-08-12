@@ -216,7 +216,7 @@ function App() {
               <SeasonStatsTable />
             </Paper>                   
             <Paper sx={{ marginTop: "25px"}} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Balances <HelpIcon text="Ungefähre Kontostände der Manager minus der täglichen login Bonis und Geld durch Errungenschaften."/> </Typography>
+              <Typography variant="h4" sx={{ padding: "15px" }}>Balances <HelpIcon text="Ungefähre Kontostände der Manager. Ohne den Schalter zählen nur Transfers. Mit dem Schalter kommen täglicher Login-Bonus und Erfolge dazu - beides geschätzt: der tägliche Login wird für alle unterstellt, die Erfolge werden aus dem Spielstand abgeleitet. Erfolge, die sich nicht herleiten lassen, fehlen."/></Typography>
               <Balances />
             </Paper>
             <Paper sx={{ marginTop: "25px"}} elevation={5}>

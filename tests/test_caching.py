@@ -174,6 +174,25 @@ def test_user_stats_keeps_users_apart():
     assert len(fake.urls) == 2, f"expected 2 HTTP calls for 2 users, got {len(fake.urls)}"
 
 
+def test_user_performance_fetches_each_user_once():
+    """balances() asks for every manager to read their matchday points."""
+    fake = use_fake({"/performance": {"it": []}})
+
+    leagues.user_performance("token", "league1", "user1")
+    leagues.user_performance("token", "league1", "user1")
+
+    assert len(fake.urls) == 1, f"expected 1 HTTP call, got {len(fake.urls)}"
+
+
+def test_user_performance_keeps_users_apart():
+    fake = use_fake({"/performance": {"it": []}})
+
+    leagues.user_performance("token", "league1", "user1")
+    leagues.user_performance("token", "league1", "user2")
+
+    assert len(fake.urls) == 2, f"expected 2 HTTP calls for 2 users, got {len(fake.urls)}"
+
+
 def test_profile_picture_is_downloaded_once_per_user():
     """Each call downloads a full JPEG, and both functions ask for every user."""
     from backend import miscellaneous
@@ -293,6 +312,8 @@ if __name__ == "__main__":
     check("battles keeps battle types apart", test_battles_keeps_battle_types_apart)
     check("user_stats fetches each user once", test_user_stats_fetches_each_user_once)
     check("user_stats keeps users apart", test_user_stats_keeps_users_apart)
+    check("user_performance fetches each user once", test_user_performance_fetches_each_user_once)
+    check("user_performance keeps users apart", test_user_performance_keeps_users_apart)
     check("profile picture downloaded once per user", test_profile_picture_is_downloaded_once_per_user)
 
     print("\nprefetch_players()")

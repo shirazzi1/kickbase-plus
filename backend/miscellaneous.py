@@ -9,9 +9,11 @@ import json
 import logging
 
 import pandas as pd
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from os import getenv, path, makedirs
+from zoneinfo import ZoneInfo
 from backend.paths import DATA_DIR, TIMESTAMP_DIR
 
 from backend import exceptions
@@ -27,6 +29,82 @@ PROFILEPIC_TIMEOUT = 5
 ### How many profile picture lookups to run at once. They are almost entirely spent
 ### waiting, so threads suit them, and a league has at most a few dozen managers.
 MAX_PROFILEPIC_WORKERS = 16
+
+### The activity feed references player photos as relative paths. This is the CDN that
+### serves them.
+PLAYER_IMAGE_BASE_URL = "https://kickbase.b-cdn.net/"
+
+### The daily login bonus grows by this much per day and stops at the cap. Confirmed
+### against the real type 22 feed events: day 2 pays 10.000, day 11 and every day after
+### pay 100.000.
+LOGIN_BONUS_STEP = 10_000
+LOGIN_BONUS_CAP = 100_000
+
+### Achievement rewards, from help.kickbase.com/help/erfolge.
+###
+### Not in here on purpose: the league size achievements (600 Kreisliga, 601 Regionalliga,
+### 602 2. Liga). The app shows 1.000.000 each, but they do not reach the balance - three
+### real balances only add up without them, and a cutoff at the league reset cannot
+### explain it either, since "First deal" was awarded before the reset too and does count.
+###
+### Where the numbers come from, because they have three different sources:
+###
+###   - The matchday, lucky touch and season title families, with their thresholds and
+###     amounts, are documented on help.kickbase.com/help/erfolge.
+###   - The transfer count and team value families are not on that page at all. Their
+###     thresholds and amounts were read out of the Kickbase app by the league owner on
+###     2026-08-12 and passed on. Reliable, but not independently checkable from here.
+###   - The league size achievements (600 Kreisliga, 601 Regionalliga, 602 2. Liga) are
+###     deliberately absent. The app shows 1.000.000 each, but they do not reach the
+###     balance: three real balances only add up without them, and a cutoff at the league
+###     reset cannot explain it either, since "First deal" was awarded before the reset
+###     too and does count.
+###
+### Ids 400, 500 and 501 are Kickbase's own, read off type 26 feed events. The rest are
+### ours: those achievements never appeared in a feed we could read, so there was no id to
+### copy. They are only ever used as keys into achievements.json.
+###
+### Not verified against a real balance: the tiers above bronze. None of the three
+### managers whose balance was checked against the app crosses one of those thresholds,
+### so they carry the app reading alone. If a balance is ever off by exactly one of these
+### amounts, this table is where to look.
+ACHIEVEMENTS = {
+    500: {"name": "First deal", "amount": 100_000},
+    501: {"name": "Transfer King bronze", "amount": 250_000},
+    502: {"name": "Transfer King silber", "amount": 500_000},
+    503: {"name": "Transfer King gold", "amount": 1_000_000},
+    400: {"name": "Team value bronze", "amount": 100_000},
+    401: {"name": "Team value silber", "amount": 250_000},
+    402: {"name": "Team value gold", "amount": 500_000},
+    403: {"name": "Team value platin", "amount": 1_000_000},
+    404: {"name": "Team value galaktisch", "amount": 2_000_000},
+    700: {"name": "Spieltagssieger", "amount": 1_000_000},
+    701: {"name": "Spieltagspunkte Silber", "amount": 250_000},
+    702: {"name": "Spieltagspunkte Gold", "amount": 500_000},
+    703: {"name": "Jahrhundertspiel", "amount": 1_000_000},
+    800: {"name": "Meister", "amount": 2_000_000},
+    801: {"name": "Vizemeister", "amount": 1_000_000},
+}
+
+### Trades needed per tier. Trades between managers count towards these.
+TRANSFER_TIERS = [(1, 500), (50, 501), (250, 502), (500, 503)]
+
+### Team value needed per tier. All of them also require a balance in the black.
+TEAM_VALUE_TIERS = [(125_000_000, 400), (150_000_000, 401), (200_000_000, 402),
+                    (250_000_000, 403), (350_000_000, 404)]
+
+### Profit with a single player and what it pays. Tiers stack, so 6 Mio pays the first two.
+### The threshold doubles as the id: these never appeared in the feed, so there is no
+### Kickbase id to reuse and none to collide with.
+LUCKY_TOUCH_TIERS = [
+    (3_000_000, "Bronzenes Händchen", 250_000),
+    (5_000_000, "Silbernes Händchen", 500_000),
+    (10_000_000, "Goldenes Händchen", 1_000_000),
+    (25_000_000, "Königstransfer", 2_000_000),
+]
+
+### Points in a single matchday and the achievement they earn. Tiers stack.
+MATCHDAY_POINT_TIERS = [(1_000, 701), (1_500, 702), (2_000, 703)]
 
 ### Per-run cache for profile pictures. Each lookup downloads the full image, and both
 ### balances() and league_user_stats_tables() ask for every user.
@@ -297,6 +375,410 @@ def filter_transfers_from(transfers: list, cutoff: datetime) -> list:
         list: The items at or after the cutoff, in their original order.
     """
     return [item for item in transfers if parse_feed_timestamp(item["dt"]) >= cutoff]
+
+
+### Sentinel for "nobody has bought this player yet", which is not the same as "free".
+### A manager selling a player nobody ever bought had them assigned at the season start.
+_UNCLAIMED = object()
+
+
+def drop_reverted_transfers(transfers: list) -> list:
+    """### Drop activity feed bookings that a league admin reverted.
+
+    Kickbase emits no cancellation event. A reverted transfer stays in the feed next to
+    the booking that replaced it, and both get counted: the seller is paid twice, the
+    buyer charged twice, and turnovers() invents a second sale out of the leftover.
+
+    Ownership is what gives it away, because nobody can sell a player they do not own.
+    Replaying each player's chain finds the contradiction, and the later booking is the
+    one that stuck - verified against the live squads for the 2026-08-08 incident in
+    league Kickbase-Elite 26/27.
+
+    A reversal with no replacement booking leaves no contradiction behind and cannot be
+    found this way. Only the live squads would show it.
+
+    Args:
+        transfers (list): Activity feed items with "t" == 15, in any order.
+
+    Returns:
+        list: The surviving items, in the order they were passed in.
+    """
+    def owner_after(item):
+        """Who holds the player once this booking went through. None means Kickbase."""
+        return item["data"].get("byr")
+
+    def is_possible(item, owner):
+        """Whether this booking can follow on from the current owner."""
+        seller = item["data"].get("slr")
+
+        if seller is not None:
+            ### Selling requires owning, or having been assigned the player at the start
+            return owner is _UNCLAIMED or owner == seller
+
+        ### Buying off the market requires the player to be on it
+        return owner is _UNCLAIMED or owner is None
+
+    by_player = {}
+    for item in sorted(transfers, key=lambda item: parse_feed_timestamp(item["dt"])):
+        by_player.setdefault(item["data"]["pi"], []).append(item)
+
+    reverted = set()
+
+    for player_id, chain in by_player.items():
+        kept = []
+        ### owners[-1] is the owner after everything in kept; owners[0] is the start state
+        owners = [_UNCLAIMED]
+
+        for item in chain:
+            ### Walk back over already accepted bookings until this one becomes possible.
+            ### Never past the start of the chain: dropping everything would lose more
+            ### than the reversal did.
+            while not is_possible(item, owners[-1]) and kept:
+                dropped = kept.pop()
+                owners.pop()
+                reverted.add(dropped["i"])
+
+                logging.warning(
+                    f"Ignoring reverted booking {dropped['i']} from {dropped['dt']}: "
+                    f"{dropped['data'].get('pn')} for {dropped['data']['trp']}€ "
+                    f"(seller {dropped['data'].get('slr') or 'Kickbase'}, "
+                    f"buyer {dropped['data'].get('byr') or 'Kickbase'}). It contradicts "
+                    f"booking {item['i']} from {item['dt']}, which superseded it."
+                )
+
+            kept.append(item)
+            owners.append(owner_after(item))
+
+    return [item for item in transfers if item["i"] not in reverted]
+
+
+def build_balance_events(transfers: list, user_name: str, initial_balance: float, start_datetime: datetime) -> list:
+    """### Build the list of events that produced a manager's balance.
+
+    The first event is always the starting budget, followed by every buy and sell of that
+    manager, oldest first. Each event carries the running balance after it, so the last
+    event's balance is the manager's current balance.
+
+    Events from before the start instant are ignored, the same rule turnovers() applies.
+
+    Args:
+        transfers (list): Activity feed items with "t" == 15, in any order.
+        user_name (str): The manager's display name. The feed names buyer ("byr") and
+            seller ("slr") by display name, not by user ID.
+        initial_balance (float): The budget every manager starts out with.
+        start_datetime (datetime): The season start or league reset instant.
+
+    Returns:
+        list: Event dicts, oldest first, starting with the "start" event.
+    """
+    ### sorted() returns a new list on purpose. The feed is cached per run and shared with
+    ### turnovers(), so sorting in place would reorder it for every other caller.
+    relevant = sorted(
+        filter_transfers_from(transfers, start_datetime),
+        key=lambda item: parse_feed_timestamp(item["dt"]),
+    )
+
+    balance = initial_balance
+
+    events = [{
+        "date": start_datetime.isoformat(),
+        "type": "start",
+        "amount": round(initial_balance),
+        "balance": round(balance),
+        "playerName": None,
+        "playerImage": None,
+        "teamId": None,
+        "tradePartner": None,
+    }]
+
+    for item in relevant:
+        data = item["data"]
+        price = data["trp"]
+
+        ### Only one side of a transfer is named when the other side was Kickbase itself
+        if data.get("byr") == user_name:
+            event_type, amount, trade_partner = "buy", -price, data.get("slr")
+        elif data.get("slr") == user_name:
+            event_type, amount, trade_partner = "sell", price, data.get("byr")
+        else:
+            continue
+
+        balance += amount
+
+        player_image = data.get("pim")
+
+        events.append({
+            "date": item["dt"],
+            "type": event_type,
+            "amount": amount,
+            "balance": round(balance),
+            "playerName": data.get("pn"),
+            "playerImage": PLAYER_IMAGE_BASE_URL + player_image if player_image else None,
+            "teamId": data.get("tid"),
+            "tradePartner": trade_partner,
+        })
+
+    return events
+
+
+def build_login_bonus_events(start_datetime: datetime, until: datetime) -> list:
+    """### Build the estimated daily login bonus events for one manager.
+
+    Day 1 is the day the season started and pays nothing. Every day after that pays
+    10.000 more than the one before, up to 100.000, which is then paid every day.
+
+    The day counter runs over calendar days in the app timezone rather than over elapsed
+    hours. The real feed settles it: day 11 arrived at 01:13 UTC and day 12 at 22:03 UTC
+    on the same UTC date, which are two different days in Europe/Berlin. Counting hours
+    would fall a day behind and keep drifting.
+
+    The bonus is an assumption. Type 22 feed events exist only for the logged in user, so
+    there is no way to tell whether another manager logged in on a given day. Assuming it
+    for everyone at least treats them alike.
+
+    Args:
+        start_datetime (datetime): The season start or league reset instant.
+        until (datetime): The instant to count up to, normally now.
+
+    Returns:
+        list: Event dicts of type "login_bonus", oldest first, without a running balance.
+    """
+    zone = ZoneInfo(getenv("TZ", "Europe/Berlin"))
+
+    first_day = start_datetime.astimezone(zone).date()
+    last_day = until.astimezone(zone).date()
+
+    events = []
+
+    for offset in range(1, (last_day - first_day).days + 1):
+        day = first_day + timedelta(days=offset)
+
+        events.append({
+            ### Dated at the start of that day in the app timezone. The real collection
+            ### time depends on when the manager opened the app, which we cannot know.
+            "date": datetime.combine(day, time.min, tzinfo=zone).astimezone(timezone.utc).isoformat(),
+            "type": "login_bonus",
+            "amount": min(LOGIN_BONUS_CAP, offset * LOGIN_BONUS_STEP),
+            "balance": None,
+            "playerName": None,
+            "playerImage": None,
+            "teamId": None,
+            "tradePartner": None,
+        })
+
+    return events
+
+
+def detect_achievements(trades: int, team_value: float, balance: float, turnovers: list,
+                        matchday_wins: int, matchday_points: list, placement: int,
+                        season_over: bool) -> list:
+    """### Work out which achievements a manager has earned.
+
+    Only the ones that can be derived from data the project already fetches. Every
+    achievement counts once per season, except the matchday win, which pays per win.
+
+    Args:
+        trades (int): Transfers made this season. Trades between managers count.
+        team_value (float): The manager's current team value.
+        balance (float): The manager's balance. Team value rewards are withheld when it
+            is negative.
+        turnovers (list): The manager's buy/sell pairs, as turnovers.json holds them.
+        matchday_wins (int): How many matchdays the manager won.
+        matchday_points (list): Points scored on each matchday played so far.
+        placement (int): The manager's position in the league.
+        season_over (bool): Whether every matchday has been played. The season titles pay
+            only then, since the placement moves until the last whistle.
+
+    Returns:
+        list: Dicts of {"id", "name", "amount"} for everything earned.
+    """
+    earned = []
+
+    def award(achievement_id, name=None, amount=None):
+        """Record one earned achievement, defaulting to the catalogue entry."""
+        entry = ACHIEVEMENTS.get(achievement_id, {})
+
+        earned.append({
+            "id": achievement_id,
+            "name": name or entry["name"],
+            "amount": amount if amount is not None else entry["amount"],
+        })
+
+    ### Tiers stack: 250 trades earn the first deal and both Transfer King tiers below it
+    for threshold, achievement_id in TRANSFER_TIERS:
+        if trades >= threshold:
+            award(achievement_id)
+
+    ### Withheld in the red, whatever the team value. This is the rule that explained
+    ### three real balances that no simpler model fit.
+    ###
+    ### The boundary is a guess: the FAQ says "positive account balance", which reads as
+    ### strictly greater than zero, and none of the three managers sat at exactly zero to
+    ### settle it. If a reward ever goes missing at a balance of 0, this is the line.
+    if balance > 0:
+        for threshold, achievement_id in TEAM_VALUE_TIERS:
+            if team_value >= threshold:
+                award(achievement_id)
+
+    ### One entry per win: the only repeatable achievement we can derive
+    for _ in range(matchday_wins):
+        award(700)
+
+    ### The best single matchday decides which point tiers were reached, each once
+    best_matchday = max(matchday_points, default=0)
+    for threshold, achievement_id in MATCHDAY_POINT_TIERS:
+        if best_matchday >= threshold:
+            award(achievement_id)
+
+    ### The placement only settles once the last matchday has been played
+    if season_over and placement == 1:
+        award(800)
+    elif season_over and placement == 2:
+        award(801)
+
+    ### The lucky touch family. Both sides have to go through the market, the player must
+    ### not have been assigned at the start, and the best single profit decides which
+    ### tiers are reached - each of them once for the whole season.
+    best_profit = 0
+    for buy, sell in turnovers:
+        if buy.get("type") == "assigned_at_start":
+            continue
+        if buy.get("tradePartner") != "Kickbase" or sell.get("tradePartner") != "Kickbase":
+            continue
+
+        best_profit = max(best_profit, sell["price"] - buy["price"])
+
+    for threshold, name, amount in LUCKY_TOUCH_TIERS:
+        if best_profit >= threshold:
+            award(threshold, name=name, amount=amount)
+
+    return earned
+
+
+def merge_earned_achievements(stored: list, earned_now: list, now: datetime, start_datetime: datetime) -> list:
+    """### Fold the achievements detected in this run into the ones already on record.
+
+    Two things have to survive, and keying by id alone loses one of them:
+
+    - **The date of the first sighting.** Most achievements cannot be dated from the data
+      we have, so the moment we first saw one is the best date there is.
+    - **The count.** The matchday win pays once per win, so three wins have to stay three
+      entries. Folding them into one would freeze the counter for the rest of the season,
+      because the single stored entry then satisfies every later run.
+
+    Entries earned before start_datetime belong to a previous season or to the state
+    before a league reset and are dropped, the same cutoff the transfers use. Without it
+    they would keep paying, and merge_balance_events() would sort them in front of the
+    starting budget, which breaks reading the balance column downwards.
+
+    A stored entry keeps the amount it was recorded with. Correcting a figure in
+    ACHIEVEMENTS therefore only affects achievements sighted after the correction - the
+    record stays a record of what was granted, not of what the catalogue says today. To
+    apply a correction retroactively, delete achievements.json and let it rebuild.
+
+    Args:
+        stored (list): What achievements.json holds for this manager, each with "earnedAt".
+        earned_now (list): What detect_achievements() returned, without a date.
+        now (datetime): The date to stamp on newly sighted achievements.
+        start_datetime (datetime): The season start or league reset instant.
+
+    Returns:
+        list: The merged record, oldest first, ready to be written back.
+    """
+    kept = [a for a in stored if parse_feed_timestamp(a["earnedAt"]) >= start_datetime]
+
+    expired = len(stored) - len(kept)
+    if expired:
+        logging.info(f"Ignoring {expired} achievement(s) earned before {start_datetime.isoformat()}.")
+
+    on_record = Counter((a["id"], a["name"]) for a in kept)
+    detected = Counter((a["id"], a["name"]) for a in earned_now)
+    template = {(a["id"], a["name"]): a for a in earned_now}
+
+    ### Only the surplus is new. A repeatable achievement seen three times but recorded
+    ### twice adds one entry, not three.
+    for key, count in detected.items():
+        for _ in range(count - on_record[key]):
+            kept.append({**template[key], "earnedAt": now.isoformat()})
+
+    return sorted(kept, key=lambda a: a["earnedAt"])
+
+
+def merge_balance_events(*streams) -> list:
+    """### Merge event streams into one chronological list with a running balance.
+
+    The streams come from build_balance_events(), build_login_bonus_events() and the
+    achievement events. Each event carries its own "amount"; the balance is recomputed
+    across the merge, because a bonus between two transfers shifts everything after it.
+
+    Args:
+        *streams (list): Event lists, each in the shape build_balance_events() produces.
+
+    Returns:
+        list: A new list of new dicts, oldest first, with "balance" filled in.
+    """
+    merged = sorted(
+        (dict(event) for stream in streams for event in stream),
+        key=lambda event: parse_feed_timestamp(event["date"]),
+    )
+
+    balance = 0
+    for event in merged:
+        balance += event["amount"]
+        event["balance"] = round(balance)
+
+    return merged
+
+
+def matchday_points(performance: dict) -> list:
+    """### Read the points a manager scored on each matchday played.
+
+    The performance response nests a list of seasons, each holding its matchdays. Only
+    matchdays that have been played carry "mdp".
+
+    Args:
+        performance (dict): A /managers/{id}/performance response.
+
+    Returns:
+        list: Points per played matchday, current season only.
+    """
+    seasons = performance.get("it") or []
+
+    if not seasons:
+        return []
+
+    ### The current season is the last one in the list
+    return [day["mdp"] for day in seasons[-1].get("it", []) if "mdp" in day]
+
+
+def season_is_over(now: datetime) -> bool:
+    """### Whether every matchday of the season has been played.
+
+    Reads match_days.json, which team_value_per_match_day() writes. Without it there is
+    no way to tell, and treating the season as running is the safe answer: it only
+    withholds the season titles.
+
+    Args:
+        now (datetime): The instant to judge against.
+
+    Returns:
+        bool: True once the last match of the season is over.
+    """
+    match_days_path = path.join(DATA_DIR, "match_days.json")
+
+    if not path.exists(match_days_path):
+        return False
+
+    try:
+        with open(match_days_path, "r") as f:
+            match_days = json.load(f)
+    except json.JSONDecodeError:
+        return False
+
+    if not match_days:
+        return False
+
+    return parse_feed_timestamp(match_days[-1]["lastMatch"]) < now
 
 
 def write_json_to_file(data, file_name: str) -> None:

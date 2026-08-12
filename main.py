@@ -521,9 +521,15 @@ def turnovers(user_token: str, selected_league: object) -> None:
     if dropped:
         logging.info(f"Ignored {dropped} transfer(s) from before START_DATE ({start_datetime.isoformat()}).")
 
-    ### Save updated transfers back to all_transfers.json
+    ### Save updated transfers back to all_transfers.json.
+    ### The cache stays the raw record of what the API said. Reverted bookings are
+    ### dropped below, for the calculation only, so a later correction can still be seen.
     miscellaneous.write_json_to_file(all_transfers, "all_transfers.json")
     logging.debug("Updated all_transfers.json with new transfers")
+
+    ### A booking an admin reverted stays in the feed, and an unpaired leftover sale would
+    ### have a start of season market value invented for it as its buy price
+    all_transfers = miscellaneous.drop_reverted_transfers(all_transfers)
 
     ### Process the transfers as usual
     transfers = []
@@ -826,8 +832,36 @@ def live_points(user_token: str, selected_league: object) -> list:
     return final_live_points
 
 
+def max_bid(team_value: float, balance: float) -> float:
+    """### The most a manager could bid, given a team value and a balance.
+
+    A manager may go negative by up to a third of team value plus balance, so the room
+    left is that limit reduced by however far they are in the red already.
+
+    Args:
+        team_value (float): The manager's team value.
+        balance (float): The manager's balance.
+
+    Returns:
+        float: The highest possible bid, never below zero.
+    """
+    max_negative_balance = (team_value + balance) * 0.33
+
+    if balance < 0:
+        return max(0, max_negative_balance + balance)
+
+    return max(0, max_negative_balance)
+
+
 def balances(user_token: str, selected_league: object) -> None:
-    """### Retrieves the estiamted balances for all users in the league. Daily login bonus and money from achievements are not considered.
+    """### Retrieves the estimated balances for all users in the league, together with the
+    events that produced them.
+
+    Every user is written twice: once counting transfers only, and once with the daily
+    login bonus and the achievement rewards folded in. The second view is an estimate on
+    two counts - a daily login is assumed for everyone, because the feed only reveals the
+    logged in user's, and the achievements are derived from the current standings rather
+    than read from the feed.
 
     Args:
         user_token (str): The user's kkstrauth token.
@@ -838,67 +872,114 @@ def balances(user_token: str, selected_league: object) -> None:
     initial_balance = float(getenv("START_MONEY", 50000000))
     final_balances = []
 
+    ### Everything from before the season start or league reset belongs to a previous
+    ### season and must not count towards this balance, the same cutoff turnovers() uses.
+    start_datetime = miscellaneous.get_start_datetime()
+
     ### Get all transfers from the API
     all_transfers = leagues.transfers(user_token, selected_league.id)
     logging.debug(f"Found {len(all_transfers)} transfers in total")
 
-    ### Initialize user balances
+    ### Cut to this season before looking for reverted bookings, the same order turnovers()
+    ### uses. Across a reset the ownership chain contradicts itself by design - players are
+    ### reassigned - and the warnings would name bookings nobody counts anyway.
+    all_transfers = miscellaneous.filter_transfers_from(all_transfers, start_datetime)
+
+    ### A booking an admin reverted stays in the feed, so it would be counted twice
+    all_transfers = miscellaneous.drop_reverted_transfers(all_transfers)
+
+    ### Read the league members
     with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
-        user_balances = {user_id: initial_balance for user_id, user_name in league_users.items()}
 
     ### Look the profile pictures up all at once. A user without one costs a full
     ### timeout, so doing them one by one dominated the runtime of this function.
     miscellaneous.prefetch_profilepics(league_users.keys())
 
+    ### Achievements earned in earlier runs. Detection looks at the current standings, so
+    ### without this an achievement would vanish again once the condition stops holding -
+    ### a team value can fall back below the threshold. The file also carries the date the
+    ### running balance needs, since the real one cannot be derived.
+    achievements_path = path.join(DATA_DIR, "achievements.json")
+    earned_per_user = {}
+
+    if path.exists(achievements_path):
+        try:
+            with open(achievements_path, "r") as f:
+                earned_per_user = json.load(f)
+        except json.JSONDecodeError:
+            logging.warning(f"{achievements_path} is empty or invalid. Starting over.")
+
+    ### Turnovers per manager, for the lucky touch family. turnovers() runs after this
+    ### function, so the file is one run behind - an achievement shows up a run late.
+    turnovers_by_user = {}
+    turnovers_path = path.join(DATA_DIR, "turnovers.json")
+
+    if path.exists(turnovers_path):
+        try:
+            with open(turnovers_path, "r") as f:
+                for buy, sell in json.load(f):
+                    turnovers_by_user.setdefault(sell["user"], []).append((buy, sell))
+        except json.JSONDecodeError:
+            logging.warning(f"{turnovers_path} is empty or invalid. No transfer achievements.")
+
+    now = datetime.now(timezone.utc)
+
+    ### The season titles only settle once the last matchday has been played
+    season_over = miscellaneous.season_is_over(now)
+
+    ### The same for every manager: a daily login is assumed for all of them alike, because
+    ### the feed reveals the real bonuses only for the logged in user.
+    bonus_events = miscellaneous.build_login_bonus_events(start_datetime, now)
+
     ### Loop through all users in the league
     for user_id, user_name in league_users.items():
-        balance = user_balances.get(user_id, initial_balance)
-
-        logging.debug(f"User: {user_name}; Starter balance: {balance}")
-
         user_stats = leagues.user_stats(user_token, selected_league.id, user_id)
         team_value = user_stats["tv"]
         logging.debug(f"Team value of {user_name}: {team_value}")
 
-        ### Check every item in the all_transfers list if it belongs to the current user
-        for item in all_transfers:
-            ### Check if item is a buy or sell transfer
-            if item["t"] == 15:
-                transfer_amount = item["data"]["trp"]
+        ### The events are the balance: the last one carries the current figure, and the
+        ### frontend shows the same list behind the Kontostand column.
+        events = miscellaneous.build_balance_events(all_transfers, user_name, initial_balance, start_datetime)
+        balance = events[-1]["balance"]
 
-                if "byr" in item["data"] and {value: key for key, value in league_users.items()}.get(item["data"]["byr"]) == user_id:
-                    ### User bought a player
-                    balance -= transfer_amount
+        logging.debug(f"User: {user_name}; Starter balance: {initial_balance}; Balance after {len(events) - 1} transfer(s): {balance}")
 
-                    player_last_name = item["data"]["pn"]
-                    logging.debug(f"{user_name} bought {player_last_name} for {transfer_amount}€")
-                    logging.debug(f"New balance: {balance}")
-                elif "slr" in item["data"] and {value: key for key, value in league_users.items()}.get(item["data"]["slr"]) == user_id:
-                    ### User sold a player
-                    balance += transfer_amount
+        ### Everything below is an estimate, which is why it stays in its own fields.
+        ### The team value reward is withheld in the red, so it has to be judged against
+        ### the balance including the login bonuses - not against the transfers alone.
+        balance_for_reward_check = balance + sum(e["amount"] for e in bonus_events)
 
-                    player_last_name = item["data"]["pn"]
-                    logging.debug(f"{user_name} sold {player_last_name} for {transfer_amount}€")
-                    logging.debug(f"New balance: {balance}")
+        earned_now = miscellaneous.detect_achievements(
+            user_stats.get("t", 0),
+            team_value,
+            balance_for_reward_check,
+            turnovers_by_user.get(user_name, []),
+            user_stats["mdw"],
+            miscellaneous.matchday_points(
+                leagues.user_performance(user_token, selected_league.id, user_id)),
+            user_stats["pl"],
+            season_over,
+        )
 
-        ### Update the user balance
-        user_balances[user_id] = balance
+        earned_per_user[user_id] = miscellaneous.merge_earned_achievements(
+            earned_per_user.get(user_id, []), earned_now, now, start_datetime)
 
-        ### Calculate the adjusted team value
-        adjusted_team_value = team_value + balance
+        achievement_events = [{
+            "date": a["earnedAt"],
+            "type": "achievement",
+            "amount": a["amount"],
+            "balance": None,
+            "achievementName": a["name"],
+            "playerName": None,
+            "playerImage": None,
+            "teamId": None,
+            "tradePartner": None,
+        } for a in earned_per_user[user_id]]
 
-        ### Calculate the maximum allowable negative balance
-        max_negative_balance = adjusted_team_value * 0.33
-
-        ### Calculate the maxbid
-        if balance < 0:
-            maxbid = max_negative_balance + balance
-        else:
-            maxbid = max_negative_balance
-
-        ### Ensure maxbid is not negative
-        maxbid = max(0, maxbid)
+        events_with_bonuses = miscellaneous.merge_balance_events(
+            events, bonus_events, achievement_events)
+        balance_with_bonuses = events_with_bonuses[-1]["balance"]
 
         ### Create a custom json dict for every user
         final_balances.append({
@@ -906,14 +987,19 @@ def balances(user_token: str, selected_league: object) -> None:
             "username": user_name,
             "profilePic": miscellaneous.get_profilepic(user_id),
             "teamValue": team_value,
-            "balance": round(balance, 0),
-            "maxBid": round(maxbid, 0),
+            "balance": balance,
+            "maxBid": round(max_bid(team_value, balance), 0),
+            "events": events,
+            "balanceWithBonuses": balance_with_bonuses,
+            "maxBidWithBonuses": round(max_bid(team_value, balance_with_bonuses), 0),
+            "eventsWithBonuses": events_with_bonuses,
         })
 
     logging.info("Got balances.")
 
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(final_balances, "balances.json")
+    miscellaneous.write_json_to_file(earned_per_user, "achievements.json")
     miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_balances.json")
 
 ### -------------------------------------------------------------------
