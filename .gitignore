@@ -9,5 +9,10 @@ node_modules/
 !package-lock.json
 *.log
 logs/
+frontend/build/
+
+### Agent worktrees. These are checkouts of this very repository, so committing them
+### would nest a repo inside itself.
+.claude/
 
 .env
