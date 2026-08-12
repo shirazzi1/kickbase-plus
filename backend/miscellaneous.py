@@ -10,8 +10,9 @@ import logging
 
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 from os import getenv, path, makedirs
+from zoneinfo import ZoneInfo
 from backend.paths import DATA_DIR, TIMESTAMP_DIR
 
 from backend import exceptions
@@ -31,6 +32,12 @@ MAX_PROFILEPIC_WORKERS = 16
 ### The activity feed references player photos as relative paths. This is the CDN that
 ### serves them.
 PLAYER_IMAGE_BASE_URL = "https://kickbase.b-cdn.net/"
+
+### The daily login bonus grows by this much per day and stops at the cap. Confirmed
+### against the real type 22 feed events: day 2 pays 10.000, day 11 and every day after
+### pay 100.000.
+LOGIN_BONUS_STEP = 10_000
+LOGIN_BONUS_CAP = 100_000
 
 ### Per-run cache for profile pictures. Each lookup downloads the full image, and both
 ### balances() and league_user_stats_tables() ask for every user.
@@ -442,6 +449,54 @@ def build_balance_events(transfers: list, user_name: str, initial_balance: float
             "playerImage": PLAYER_IMAGE_BASE_URL + player_image if player_image else None,
             "teamId": data.get("tid"),
             "tradePartner": trade_partner,
+        })
+
+    return events
+
+
+def build_login_bonus_events(start_datetime: datetime, until: datetime) -> list:
+    """### Build the estimated daily login bonus events for one manager.
+
+    Day 1 is the day the season started and pays nothing. Every day after that pays
+    10.000 more than the one before, up to 100.000, which is then paid every day.
+
+    The day counter runs over calendar days in the app timezone rather than over elapsed
+    hours. The real feed settles it: day 11 arrived at 01:13 UTC and day 12 at 22:03 UTC
+    on the same UTC date, which are two different days in Europe/Berlin. Counting hours
+    would fall a day behind and keep drifting.
+
+    The bonus is an assumption. Type 22 feed events exist only for the logged in user, so
+    there is no way to tell whether another manager logged in on a given day. Assuming it
+    for everyone at least treats them alike.
+
+    Args:
+        start_datetime (datetime): The season start or league reset instant.
+        until (datetime): The instant to count up to, normally now.
+
+    Returns:
+        list: Event dicts of type "login_bonus", oldest first, without a running balance.
+    """
+    zone = ZoneInfo(getenv("TZ", "Europe/Berlin"))
+
+    first_day = start_datetime.astimezone(zone).date()
+    last_day = until.astimezone(zone).date()
+
+    events = []
+
+    for offset in range(1, (last_day - first_day).days + 1):
+        day = first_day + timedelta(days=offset)
+
+        events.append({
+            ### Dated at the start of that day in the app timezone. The real collection
+            ### time depends on when the manager opened the app, which we cannot know.
+            "date": datetime.combine(day, time.min, tzinfo=zone).astimezone(timezone.utc).isoformat(),
+            "type": "login_bonus",
+            "amount": min(LOGIN_BONUS_CAP, offset * LOGIN_BONUS_STEP),
+            "balance": None,
+            "playerName": None,
+            "playerImage": None,
+            "teamId": None,
+            "tradePartner": None,
         })
 
     return events
