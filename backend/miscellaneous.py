@@ -28,6 +28,10 @@ PROFILEPIC_TIMEOUT = 5
 ### waiting, so threads suit them, and a league has at most a few dozen managers.
 MAX_PROFILEPIC_WORKERS = 16
 
+### The activity feed references player photos as relative paths. This is the CDN that
+### serves them.
+PLAYER_IMAGE_BASE_URL = "https://kickbase.b-cdn.net/"
+
 ### Per-run cache for profile pictures. Each lookup downloads the full image, and both
 ### balances() and league_user_stats_tables() ask for every user.
 _profilepic_cache = {}
@@ -297,6 +301,75 @@ def filter_transfers_from(transfers: list, cutoff: datetime) -> list:
         list: The items at or after the cutoff, in their original order.
     """
     return [item for item in transfers if parse_feed_timestamp(item["dt"]) >= cutoff]
+
+
+def build_balance_events(transfers: list, user_name: str, initial_balance: float, start_datetime: datetime) -> list:
+    """### Build the list of events that produced a manager's balance.
+
+    The first event is always the starting budget, followed by every buy and sell of that
+    manager, oldest first. Each event carries the running balance after it, so the last
+    event's balance is the manager's current balance.
+
+    Events from before the start instant are ignored, the same rule turnovers() applies.
+
+    Args:
+        transfers (list): Activity feed items with "t" == 15, in any order.
+        user_name (str): The manager's display name. The feed names buyer ("byr") and
+            seller ("slr") by display name, not by user ID.
+        initial_balance (float): The budget every manager starts out with.
+        start_datetime (datetime): The season start or league reset instant.
+
+    Returns:
+        list: Event dicts, oldest first, starting with the "start" event.
+    """
+    ### sorted() returns a new list on purpose. The feed is cached per run and shared with
+    ### turnovers(), so sorting in place would reorder it for every other caller.
+    relevant = sorted(
+        filter_transfers_from(transfers, start_datetime),
+        key=lambda item: parse_feed_timestamp(item["dt"]),
+    )
+
+    balance = initial_balance
+
+    events = [{
+        "date": start_datetime.isoformat(),
+        "type": "start",
+        "amount": round(initial_balance),
+        "balance": round(balance),
+        "playerName": None,
+        "playerImage": None,
+        "teamId": None,
+        "tradePartner": None,
+    }]
+
+    for item in relevant:
+        data = item["data"]
+        price = data["trp"]
+
+        ### Only one side of a transfer is named when the other side was Kickbase itself
+        if data.get("byr") == user_name:
+            event_type, amount, trade_partner = "buy", -price, data.get("slr")
+        elif data.get("slr") == user_name:
+            event_type, amount, trade_partner = "sell", price, data.get("byr")
+        else:
+            continue
+
+        balance += amount
+
+        player_image = data.get("pim")
+
+        events.append({
+            "date": item["dt"],
+            "type": event_type,
+            "amount": amount,
+            "balance": round(balance),
+            "playerName": data.get("pn"),
+            "playerImage": PLAYER_IMAGE_BASE_URL + player_image if player_image else None,
+            "teamId": data.get("tid"),
+            "tradePartner": trade_partner,
+        })
+
+    return events
 
 
 def write_json_to_file(data, file_name: str) -> None:
