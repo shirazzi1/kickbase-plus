@@ -43,10 +43,10 @@ dem Feed. Der Katalog liegt als eine Datenstruktur an einer Stelle im Code.
 | --- | --- | --- | --- | --- |
 | 500 | First deal | 1 Transfer | 100.000 | `trades` |
 | 501 | Transfer King bronze | 50 Transfers | 250.000 | `trades` |
-| 400 | Team value bronze | 125 Mio Teamwert | 100.000 | `teamValue` |
-| 600 | Kreisliga | Liga hat 3 Manager | 1.000.000 | Mitgliederzahl |
-| 601 | Regionalliga | Liga hat 6 Manager | 1.000.000 | Mitgliederzahl |
-| 602 | 2. Liga | Liga hat 12 Manager | 1.000.000 | Mitgliederzahl |
+| 400 | Team value bronze | 125 Mio Teamwert, nur bei positivem Kontostand | 100.000 | `teamValue` |
+| 600 | Kreisliga | Liga hat 3 Manager | 1.000.000, **zahlt nicht aufs Konto** | — |
+| 601 | Regionalliga | Liga hat 6 Manager | 1.000.000, **zahlt nicht aufs Konto** | — |
+| 602 | 2. Liga | Liga hat 12 Manager | 1.000.000, **zahlt nicht aufs Konto** | — |
 | — | Spieltagssieger | je Spieltagssieg | 1.000.000 | `mdWins`, wiederholbar |
 | — | Spieltagspunkte Silber | 1000 Punkte an einem Spieltag | 250.000 | `user_performance()` |
 | — | Spieltagspunkte Gold | 1500 Punkte | 500.000 | `user_performance()` |
@@ -58,43 +58,58 @@ dem Feed. Der Katalog liegt als eine Datenstruktur an einer Stelle im Code.
 | — | Meister | Saisonsieg | 2.000.000 | `placement` |
 | — | Vizemeister | Platz 2 | 1.000.000 | `placement` |
 
-Zwei Regeln, beide vom Nutzer bestätigt:
+Die Regeln, aus `help.kickbase.com/help/erfolge` und vom Nutzer bestätigt:
 
+- **Jeder Erfolg zählt einmal pro Saison.** Auch die Händchen-Stufen: drei Spieler mit je
+  3 Mio Gewinn bringen einmal Bronze, nicht dreimal.
 - **Stufen stapeln.** 6 Mio Gewinn mit einem Spieler bringt Bronze *und* Silber, also
   750.000 €.
-- **Die Händchen-Familie zählt nur bei Verkäufen an den Markt.** Ein Verkauf an einen
-  anderen Manager löst sie nicht aus. In der Liga waren zum Zeitpunkt des Entwurfs alle
-  vier Verkäufe über 3 Mio Gewinn Managertausche — die Regel verhindert also konkret
+- **Die Händchen-Familie verlangt Kauf *und* Verkauf über den Markt.** Ein Managertausch
+  löst sie auf keiner der beiden Seiten aus. In der Liga waren zum Zeitpunkt des Entwurfs
+  alle vier Verkäufe über 3 Mio Gewinn Managertausche — die Regel verhindert also konkret
   1.500.000 € an falscher Gutschrift.
+- **Automatisch zugewiesene Spieler zählen nicht.** Das trifft genau die synthetischen
+  `assigned_at_start`-Käufe, die `turnovers()` erzeugt, wenn ein Verkauf keinen Kauf hat.
+  Sie müssen für die Händchen-Familie ausgeschlossen werden.
+- **Der Gewinn misst sich am Kaufpreis**, nicht am Marktwert. Das rechnet `turnovers()`
+  bereits so.
 - **„Transfer King" zählt dagegen alles**, auch Managertausche. Das Dashboard-Feld
   `trades` ist damit die richtige Quelle.
+- **Teamwert-Erfolge werden nur bei positivem Kontostand gutgeschrieben.** Steht der
+  Manager im Minus, verfällt die Prämie.
+- **Auszahlung:** Punkteprämien mit den finalen Spieltagspunkten, Erfolge in der Regel am
+  Montagabend oder in der Nacht darauf. Für die Datierung der Spieltagserfolge brauchbar.
 
-### Der START_DATE-Schnitt gilt auch für Erfolge
+### Wie das Modell hergeleitet wurde
 
-Erfolge von vor dem Saisonstart oder Liga-Reset zählen nicht, genau wie Transfers.
-
-Hergeleitet, nicht geraten: gegen den echten Kontostand fehlten bei shirazzi 350.000 € an
-Erfolgen, nicht die 3.450.000 € des vollen Katalogs. Dafür gab es zwei Erklärungen, die
-beide exakt 350.000 € ergeben, weil „First deal" und „Team value bronze" beide 100.000 €
-wert sind:
+Gegen den echten Kontostand fehlten bei shirazzi 350.000 € an Erfolgen, nicht die
+3.450.000 € des vollen Katalogs. Zwei Erklärungen ergaben beide exakt 350.000 €, weil
+„First deal" und „Team value bronze" beide 100.000 € wert sind:
 
 - **A** — Liga-Größen-Erfolge und „Team value bronze" zahlen kein Geld.
-- **B** — alles vor dem Reset zählt nicht. Die drei Liga-Erfolge und „First deal" wurden
-  am 01.08. vor 18:00 Uhr vergeben, die Beitritts-Events liegen zwischen 17:46 und 17:56.
+- **B** — alles vor dem Liga-Reset um 18:00 Uhr zählt nicht. Die drei Liga-Erfolge und
+  „First deal" wurden am 01.08. davor vergeben, die Beitritts-Events liegen zwischen
+  17:46 und 17:56 Uhr.
 
-Die Entscheidung fällt auf **B**, weil die App für die Liga-Erfolge ausdrücklich
-1.000.000 € ausweist: A müsste unterstellen, dass eine angezeigte Prämie nie gezahlt wird.
-B erklärt dasselbe Ergebnis damit, dass sie gezahlt wurde und der Reset sie mit allem
-anderen auf 50 Mio zurückgesetzt hat. Und B ist dieselbe Regel, die Transfers und
-Transfererlöse schon befolgen.
+Der Gegentest an Twilli und Reddy trennte sie nicht — **Twilli traf die B-Zahl, Reddy die
+A-Zahl.** Aufgelöst hat es erst die Regel aus der FAQ, dass Teamwert-Erfolge einen
+positiven Kontostand voraussetzen:
 
-Ein Gegentest an Twilli und Reddy (die A und B um 100.000 € unterschiedlich treffen)
-bestätigte die Größenordnung, konnte die beiden Erklärungen aber nicht trennen.
+| Manager | Kontostand | Team value bronze | Erfolge gesamt |
+| --- | --- | --- | --- |
+| shirazzi | negativ | verfällt | 350.000 (First deal + Transfer King) |
+| Twilli | positiv | wird gezahlt | 200.000 (First deal + Team value) |
+| Reddy | negativ | verfällt | 100.000 (nur First deal) |
 
-**Das Restrisiko steht im Code.** In einer frisch erstellten Liga ohne Reset fallen die
-Liga-Größen-Erfolge hinter `START_DATE` und würden 3 Mio pro Manager gutschreiben. Wäre A
-doch richtig, wäre das dort ein großer Fehler. Die Entscheidung ist deshalb eine benannte
-Konstante mit dieser Begründung als Kommentar, umstellbar in einer Zeile.
+Ein Regelsatz erklärt damit alle drei Kontostände. Es war nie A oder B.
+
+**Die Liga-Größen-Erfolge schreiben nichts aufs Konto.** Das folgt zwingend: „First deal"
+lag mit 17:47:34 Uhr ebenfalls vor dem Reset und zählt trotzdem, ein reiner
+Zeitschnitt scheidet also aus. Die 1.000.000 €, die die App je Liga-Erfolg ausweist,
+landen nicht im Budget.
+
+**Ein START_DATE-Schnitt für Erfolge ist damit nicht Teil des Modells.** Die Erfolge, die
+zählen, werden aus dem aktuellen Stand hergeleitet, nicht aus datierten Feed-Events.
 
 ### Nicht enthalten
 
@@ -167,6 +182,13 @@ das Zusammenfassen pro Monat wäre eine Änderung an einer Stelle.
 ## Was diese Rechnung nicht leistet
 
 Der Kontostand bleibt eine Schätzung. Der tägliche Login ist unterstellt, die nicht
-herleitbaren Erfolge fehlen, und zwei Erfolgsfamilien haben unbekannte Stufen. Für
-shirazzi stimmt sie nach diesem Entwurf auf den Euro — das ist ein Beleg für die Formel,
-kein Beweis für die anderen zwölf.
+herleitbaren Erfolge fehlen, und zwei Erfolgsfamilien haben unbekannte Stufen.
+
+Geprüft ist das Modell an drei Kontoständen: shirazzi auf den Euro gegen die App, Twilli
+und Reddy gegen die Angaben der beiden Manager. Dass es drei Fälle mit unterschiedlichem
+Vorzeichen des Kontostands mit einem Regelsatz trifft, macht es belastbar — ein Beweis
+für die übrigen zehn ist es nicht.
+
+Die Bestätigung von Twilli und Reddy steht als Zahl noch aus: der Nutzer hat den Abgleich
+gemacht, aber nicht mitgeteilt, welche der beiden Zahlen jeweils getroffen hat. Das
+Modell sagt 23.633.259 € für Twilli und −18.171.141 € für Reddy voraus.
