@@ -6,13 +6,41 @@ import {
     currencyFormatter,
     percentFormatter,
     currencyOrDash,
+    percentOrDash,
     deltaCellClassName,
     deltaColumnStyles,
     getStatusIcon
 } from "./SharedConstants"
+import { relativeChange, daysToBreakEven } from "./marketFormulas"
 
 // Import data
 import data from "../data/market.json"
+
+const daysFormatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 })
+
+// Every market value move gets two columns side by side: the euro amount and the same
+// move as a share of the current market value, so a 100.000 € day on a cheap player can
+// be told apart from one on an expensive player, and sorted for.
+const changeColumns = (field, label, width) => [
+    {
+        field,
+        headerName: `${label} €`,
+        type: "number",
+        width,
+        valueFormatter: currencyOrDash,
+        headerAlign: "center",
+        cellClassName: deltaCellClassName
+    },
+    {
+        field: `${field}Percent`,
+        headerName: `${label} %`,
+        type: "number",
+        width: 100,
+        valueFormatter: percentOrDash,
+        headerAlign: "center",
+        cellClassName: deltaCellClassName
+    }
+]
 
 function MarketTable() {
     const theme = useTheme()
@@ -111,6 +139,24 @@ function MarketTable() {
                 value === null || value === undefined ? "–" : percentFormatter.format(value)
         },
         {
+            field: "daysToBep",
+            headerName: "Tage bis BEP",
+            type: "number",
+            // Wide enough for the header to survive the sort arrow next to it
+            width: 155,
+            headerAlign: "center",
+            cellClassName: "font-tabular-nums",
+            valueFormatter: ({ value }) =>
+                value === null || value === undefined ? "–" : daysFormatter.format(value),
+            // Players who never break even sort last rather than first, so ascending order
+            // puts the ones that pay for themselves quickest on top
+            sortComparator: (a, b) => {
+                const rank = (value) => value === null || value === undefined ? Infinity : value
+                const [first, second] = [rank(a), rank(b)]
+                return first === second ? 0 : first - second
+            }
+        },
+        {
             field: "ownBid",
             headerName: "Dein Gebot",
             type: "number",
@@ -140,51 +186,11 @@ function MarketTable() {
                 )
             }
         },
-        {
-            field: "today",
-            headerName: "Heute",
-            type: "number",
-            width: 110,
-            valueFormatter: currencyOrDash,
-            headerAlign: "center",
-            cellClassName: deltaCellClassName
-        },
-        {
-            field: "yesterday",
-            headerName: "Gestern",
-            type: "number",
-            width: 110,
-            valueFormatter: currencyOrDash,
-            headerAlign: "center",
-            cellClassName: deltaCellClassName
-        },
-        {
-            field: "twoDays",
-            headerName: "Vorgestern",
-            type: "number",
-            width: 115,
-            valueFormatter: currencyOrDash,
-            headerAlign: "center",
-            cellClassName: deltaCellClassName
-        },
-        {
-            field: "sevenDays",
-            headerName: "7 Tage",
-            type: "number",
-            width: 110,
-            valueFormatter: currencyOrDash,
-            headerAlign: "center",
-            cellClassName: deltaCellClassName
-        },
-        {
-            field: "thirtyDays",
-            headerName: "30 Tage",
-            type: "number",
-            width: 120,
-            valueFormatter: currencyOrDash,
-            headerAlign: "center",
-            cellClassName: deltaCellClassName
-        },
+        ...changeColumns("today", "Heute", 110),
+        ...changeColumns("yesterday", "Gestern", 110),
+        ...changeColumns("twoDays", "Vorgestern", 120),
+        ...changeColumns("sevenDays", "7 Tage", 110),
+        ...changeColumns("thirtyDays", "30 Tage", 120),
         {
             field: "seller",
             headerName: "Verkäufer",
@@ -225,12 +231,20 @@ function MarketTable() {
             // What the asking price adds on top of the current market value. Always 0 for
             // free agents, where Kickbase asks exactly the market value.
             markup: row.marketValue ? row.price / row.marketValue - 1 : null,
+            // Days for the market value to grow into the asking price at the pace of the
+            // last three days
+            daysToBep: daysToBreakEven(row),
             ownBid: row.ownBid,
             today: row.today,
+            todayPercent: relativeChange(row.today, row.marketValue),
             yesterday: row.yesterday,
+            yesterdayPercent: relativeChange(row.yesterday, row.marketValue),
             twoDays: row.twoDays,
+            twoDaysPercent: relativeChange(row.twoDays, row.marketValue),
             sevenDays: row.sevenDaysAvg,
+            sevenDaysPercent: relativeChange(row.sevenDaysAvg, row.marketValue),
             thirtyDays: row.thirtyDaysAvg,
+            thirtyDaysPercent: relativeChange(row.thirtyDaysAvg, row.marketValue),
             seller: row.seller,
             isFreeAgent: row.isFreeAgent,
             // A Date, so the column sorts chronologically instead of by string

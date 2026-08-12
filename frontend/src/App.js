@@ -96,7 +96,7 @@ function App() {
       <CssBaseline />
 
       {/* Main container for the application */}
-      {/* The merged market table needs the room for its 15 columns. Capped so it does not
+      {/* The merged market table needs the room for its 21 columns. Capped so it does not
           spread itself across an ultrawide monitor. */}
       <Box sx={{ maxWidth: "1800px", width: "100%", minWidth: "700px", margin: "auto", position: "relative", marginBottom: "100px"}}>
 
@@ -156,7 +156,7 @@ function App() {
             
             {/* "Transfers" related components */}
             <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Transfermarkt <HelpIcon text="Alle Spieler auf dem Transfermarkt. Hellblau hinterlegte Zeilen sind Free Agents, also direkt von Kickbase gelistet; alle anderen sind von Nutzern aus der Liga gelistet. 'Dein Gebot' zeigt dein laufendes Gebot und den Aufschlag auf den aktuellen Marktwert. Ein Ablaufdatum liefert Kickbase nur für die eigenen Angebote."/></Typography>
+              <Typography variant="h4" sx={{ padding: "15px" }}>Transfermarkt <HelpIcon text="Alle Spieler auf dem Transfermarkt. Hellblau hinterlegte Zeilen sind Free Agents, also direkt von Kickbase gelistet; alle anderen sind von Nutzern aus der Liga gelistet. 'Dein Gebot' zeigt dein laufendes Gebot und den Aufschlag auf den aktuellen Marktwert. Ein Ablaufdatum liefert Kickbase nur für die eigenen Angebote. 'Tage bis BEP' sind die Tage, die der Marktwert beim Zuwachs der letzten drei Tage braucht, um den Preis einzuholen; ein Strich heißt, dass der Marktwert gerade nicht steigt. Neben jeder Euro-Spalte steht derselbe Zuwachs relativ zum aktuellen Marktwert."/></Typography>
               <MarketTable />
             </Paper>
             <Paper sx={{ marginTop: "25px" }} elevation={5}>

@@ -49,10 +49,18 @@ export const currencyFormatter = new Intl.NumberFormat("de-DE",
 export const percentFormatter = new Intl.NumberFormat("de-DE",
     { style: "percent", maximumFractionDigits: 1, signDisplay: "exceptZero" })
 
+// For the delta columns, where the "+" comes from CSS and a signed formatter would leave
+// a "++"
+export const unsignedPercentFormatter = new Intl.NumberFormat("de-DE",
+    { style: "percent", maximumFractionDigits: 1 })
+
 // A missing value is not a zero. Number(null) is 0, so formatting it straight would
 // claim a market value moved by exactly 0 € when the history is simply too short.
 export const currencyOrDash = ({ value }) =>
     value === null || value === undefined ? "–" : currencyFormatter.format(Number(value))
+
+export const percentOrDash = ({ value }) =>
+    value === null || value === undefined ? "–" : unsignedPercentFormatter.format(value)
 
 // Green for a gain, red for a loss, with the "+" supplied by CSS. Pair with
 // deltaColumnStyles on a wrapping Box.
