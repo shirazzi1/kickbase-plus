@@ -7,24 +7,35 @@ import Dialog from "@mui/material/Dialog"
 import DialogActions from "@mui/material/DialogActions"
 import DialogContent from "@mui/material/DialogContent"
 import DialogTitle from "@mui/material/DialogTitle"
+import Typography from "@mui/material/Typography"
 
 import PagedDataGrid from "./PagedDataGrid"
 import { currencyFormatter, deltaCellClassName, deltaColumnStyles } from "./SharedConstants"
 
-const eventTypeLabels = { start: "Startbudget", buy: "Kauf", sell: "Verkauf" }
+const eventTypeLabels = {
+    start: "Startbudget",
+    buy: "Kauf",
+    sell: "Verkauf",
+    login_bonus: "Login-Bonus",
+    achievement: "Erfolg",
+}
+
+// Transfers are recorded fact, bonuses and achievements are worked out from the rules.
+// Telling them apart is the point of showing the list at all.
+const isEstimate = (type) => type === "login_bonus" || type === "achievement"
 
 // The feed only names a counterpart when another manager was on the other side of the
 // transfer. A market purchase, a market sale and the starting budget all come from
 // Kickbase itself.
 const tradePartnerLabel = (partner) => partner || "Kickbase"
 
-function BalanceEventsDialog({ manager, onClose }) {
+function BalanceEventsDialog({ manager, withBonuses, onClose }) {
     // Not just an optimisation: PagedDataGrid reads rows.length once, on mount, to pick
     // its page size. Mounting fresh per manager is what keeps that number right.
     if (!manager)
         return null
 
-    const events = manager.events || []
+    const events = (withBonuses ? manager.eventsWithBonuses : manager.events) || []
 
     const columns = [
         {
@@ -81,11 +92,13 @@ function BalanceEventsDialog({ manager, onClose }) {
             field: "type",
             headerName: "Event",
             flex: 1,
-            // "Startbudget" is the longest label and gets truncated at the flex width
-            minWidth: 120,
+            // Achievement names are the longest labels here
+            minWidth: 170,
             headerAlign: "center",
             align: "center",
-            valueFormatter: ({ value }) => eventTypeLabels[value] || value,
+            // An achievement says which one it was, everything else uses its label
+            valueGetter: ({ row }) => row.achievementName || eventTypeLabels[row.type] || row.type,
+            cellClassName: ({ row }) => isEstimate(row.type) ? "estimated-event" : "",
         },
         {
             field: "tradePartner",
@@ -122,9 +135,16 @@ function BalanceEventsDialog({ manager, onClose }) {
     // Seven columns, three of them full currency amounts: "md" truncates them
     return (
         <Dialog open onClose={onClose} maxWidth="lg" fullWidth>
-            <DialogTitle>Kontostand-Verlauf: {manager.username}</DialogTitle>
+            <DialogTitle>
+                Kontostand-Verlauf: {manager.username}
+                {withBonuses && (
+                    <Typography variant="body2" color="text.secondary">
+                        Kursive Zeilen sind geschätzt: täglicher Login unterstellt, Erfolge aus dem Spielstand abgeleitet.
+                    </Typography>
+                )}
+            </DialogTitle>
             <DialogContent>
-                <Box sx={deltaColumnStyles}>
+                <Box sx={{ ...deltaColumnStyles, "& .estimated-event": { fontStyle: "italic", opacity: 0.75 } }}>
                     <PagedDataGrid rows={rows} columns={columns} />
                 </Box>
             </DialogContent>
