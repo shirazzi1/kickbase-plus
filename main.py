@@ -834,8 +834,13 @@ def live_points(user_token: str, selected_league: object) -> list:
 
 def balances(user_token: str, selected_league: object) -> None:
     """### Retrieves the estimated balances for all users in the league, together with the
-    events that produced them. Daily login bonus and money from achievements are not
-    considered.
+    events that produced them.
+
+    Every user is written twice: once counting transfers only, and once with the daily
+    login bonus and the achievement rewards folded in. The second view is an estimate on
+    two counts - a daily login is assumed for everyone, because the feed only reveals the
+    logged in user's, and the achievements are derived from the current standings rather
+    than read from the feed.
 
     Args:
         user_token (str): The user's kkstrauth token.
@@ -865,6 +870,38 @@ def balances(user_token: str, selected_league: object) -> None:
     ### timeout, so doing them one by one dominated the runtime of this function.
     miscellaneous.prefetch_profilepics(league_users.keys())
 
+    ### Achievements earned in earlier runs. Detection looks at the current standings, so
+    ### without this an achievement would vanish again once the condition stops holding -
+    ### a team value can fall back below the threshold. The file also carries the date the
+    ### running balance needs, since the real one cannot be derived.
+    achievements_path = path.join(DATA_DIR, "achievements.json")
+    earned_per_user = {}
+
+    if path.exists(achievements_path):
+        try:
+            with open(achievements_path, "r") as f:
+                earned_per_user = json.load(f)
+        except json.JSONDecodeError:
+            logging.warning(f"{achievements_path} is empty or invalid. Starting over.")
+
+    ### Turnovers per manager, for the lucky touch family. turnovers() runs after this
+    ### function, so the file is one run behind - an achievement shows up a run late.
+    turnovers_by_user = {}
+    turnovers_path = path.join(DATA_DIR, "turnovers.json")
+
+    if path.exists(turnovers_path):
+        try:
+            with open(turnovers_path, "r") as f:
+                for buy, sell in json.load(f):
+                    turnovers_by_user.setdefault(sell["user"], []).append((buy, sell))
+        except json.JSONDecodeError:
+            logging.warning(f"{turnovers_path} is empty or invalid. No transfer achievements.")
+
+    now = datetime.now(timezone.utc)
+
+    ### The season titles only settle once the last matchday has been played
+    season_over = miscellaneous.season_is_over(now)
+
     ### Loop through all users in the league
     for user_id, user_name in league_users.items():
         user_stats = leagues.user_stats(user_token, selected_league.id, user_id)
@@ -878,20 +915,61 @@ def balances(user_token: str, selected_league: object) -> None:
 
         logging.debug(f"User: {user_name}; Starter balance: {initial_balance}; Balance after {len(events) - 1} transfer(s): {balance}")
 
-        ### Calculate the adjusted team value
-        adjusted_team_value = team_value + balance
+        ### Everything below is an estimate, which is why it stays in its own fields
+        bonus_events = miscellaneous.build_login_bonus_events(start_datetime, now)
 
-        ### Calculate the maximum allowable negative balance
-        max_negative_balance = adjusted_team_value * 0.33
+        ### The team value reward depends on the balance being in the black, so judge it
+        ### against the balance the manager would have with the login bonuses counted in
+        balance_with_bonuses = balance + sum(e["amount"] for e in bonus_events)
 
-        ### Calculate the maxbid
-        if balance < 0:
-            maxbid = max_negative_balance + balance
-        else:
-            maxbid = max_negative_balance
+        earned_now = miscellaneous.detect_achievements(
+            user_stats.get("t", 0),
+            team_value,
+            balance_with_bonuses,
+            turnovers_by_user.get(user_name, []),
+            user_stats["mdw"],
+            miscellaneous.matchday_points(
+                leagues.user_performance(user_token, selected_league.id, user_id)),
+            user_stats["pl"],
+            season_over,
+        )
 
-        ### Ensure maxbid is not negative
-        maxbid = max(0, maxbid)
+        ### Keep the date of the first sighting and never drop one earned earlier
+        known = {(a["id"], a["name"]): a for a in earned_per_user.get(user_id, [])}
+        for achievement in earned_now:
+            known.setdefault((achievement["id"], achievement["name"]),
+                             {**achievement, "earnedAt": now.isoformat()})
+
+        earned_per_user[user_id] = sorted(known.values(), key=lambda a: a["earnedAt"])
+
+        achievement_events = [{
+            "date": a["earnedAt"],
+            "type": "achievement",
+            "amount": a["amount"],
+            "balance": None,
+            "achievementName": a["name"],
+            "playerName": None,
+            "playerImage": None,
+            "teamId": None,
+            "tradePartner": None,
+        } for a in earned_per_user[user_id]]
+
+        events_with_bonuses = miscellaneous.merge_balance_events(
+            events, bonus_events, achievement_events)
+        balance_with_bonuses = events_with_bonuses[-1]["balance"]
+
+        def max_bid(for_balance):
+            """### The most the manager could bid, given a balance.
+
+            A manager may go negative by up to a third of team value plus balance, so the
+            room left is that limit reduced by however far they are in the red already.
+            """
+            max_negative_balance = (team_value + for_balance) * 0.33
+
+            if for_balance < 0:
+                return max(0, max_negative_balance + for_balance)
+
+            return max(0, max_negative_balance)
 
         ### Create a custom json dict for every user
         final_balances.append({
@@ -900,14 +978,18 @@ def balances(user_token: str, selected_league: object) -> None:
             "profilePic": miscellaneous.get_profilepic(user_id),
             "teamValue": team_value,
             "balance": balance,
-            "maxBid": round(maxbid, 0),
+            "maxBid": round(max_bid(balance), 0),
             "events": events,
+            "balanceWithBonuses": balance_with_bonuses,
+            "maxBidWithBonuses": round(max_bid(balance_with_bonuses), 0),
+            "eventsWithBonuses": events_with_bonuses,
         })
 
     logging.info("Got balances.")
 
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(final_balances, "balances.json")
+    miscellaneous.write_json_to_file(earned_per_user, "achievements.json")
     miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_balances.json")
 
 ### -------------------------------------------------------------------
