@@ -47,9 +47,27 @@ LOGIN_BONUS_CAP = 100_000
 ### real balances only add up without them, and a cutoff at the league reset cannot
 ### explain it either, since "First deal" was awarded before the reset too and does count.
 ###
+### Where the numbers come from, because they have three different sources:
+###
+###   - The matchday, lucky touch and season title families, with their thresholds and
+###     amounts, are documented on help.kickbase.com/help/erfolge.
+###   - The transfer count and team value families are not on that page at all. Their
+###     thresholds and amounts were read out of the Kickbase app by the league owner on
+###     2026-08-12 and passed on. Reliable, but not independently checkable from here.
+###   - The league size achievements (600 Kreisliga, 601 Regionalliga, 602 2. Liga) are
+###     deliberately absent. The app shows 1.000.000 each, but they do not reach the
+###     balance: three real balances only add up without them, and a cutoff at the league
+###     reset cannot explain it either, since "First deal" was awarded before the reset
+###     too and does count.
+###
 ### Ids 400, 500 and 501 are Kickbase's own, read off type 26 feed events. The rest are
 ### ours: those achievements never appeared in a feed we could read, so there was no id to
 ### copy. They are only ever used as keys into achievements.json.
+###
+### Not verified against a real balance: the tiers above bronze. None of the three
+### managers whose balance was checked against the app crosses one of those thresholds,
+### so they carry the app reading alone. If a balance is ever off by exactly one of these
+### amounts, this table is where to look.
 ACHIEVEMENTS = {
     500: {"name": "First deal", "amount": 100_000},
     501: {"name": "Transfer King bronze", "amount": 250_000},
@@ -652,6 +670,11 @@ def merge_earned_achievements(stored: list, earned_now: list, now: datetime, sta
     before a league reset and are dropped, the same cutoff the transfers use. Without it
     they would keep paying, and merge_balance_events() would sort them in front of the
     starting budget, which breaks reading the balance column downwards.
+
+    A stored entry keeps the amount it was recorded with. Correcting a figure in
+    ACHIEVEMENTS therefore only affects achievements sighted after the correction - the
+    record stays a record of what was granted, not of what the catalogue says today. To
+    apply a correction retroactively, delete achievements.json and let it rebuild.
 
     Args:
         stored (list): What achievements.json holds for this manager, each with "earnedAt".

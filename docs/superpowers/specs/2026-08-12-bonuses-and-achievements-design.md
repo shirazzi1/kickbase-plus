@@ -36,14 +36,30 @@ taugt als echte Werte für einen und Schätzungen für zwölf.
 
 ## Die Erfolge
 
-Prämien laut `help.kickbase.com`, ergänzt um die dort nicht dokumentierten Erfolge aus
-dem Feed. Der Katalog liegt als eine Datenstruktur an einer Stelle im Code.
+Der Katalog liegt als eine Datenstruktur an einer Stelle im Code. Die Zahlen haben drei
+verschiedene Herkünfte, und das ist wichtig genug, um es hier festzuhalten:
+
+- **Spieltag, Händchen, Saisontitel** stehen mit Schwellen und Beträgen auf
+  `help.kickbase.com/help/erfolge`.
+- **Transferanzahl und Teamwert** stehen dort *nicht*. Ihre Schwellen und Beträge hat der
+  Liga-Inhaber am 12.08.2026 in der App nachgeschlagen und weitergegeben. Belastbar, aber
+  von hier aus nicht unabhängig prüfbar.
+- **Liga-Größe** kennen wir nur aus dem Feed des angemeldeten Nutzers.
+
+Gegen einen echten Kontostand verifiziert sind nur die Bronze-Stufen: keiner der drei
+geprüften Manager überschreitet eine höhere Schwelle.
 
 | ID | Erfolg | Bedingung | Prämie | Quelle |
 | --- | --- | --- | --- | --- |
 | 500 | First deal | 1 Transfer | 100.000 | `trades` |
 | 501 | Transfer King bronze | 50 Transfers | 250.000 | `trades` |
+| 502 | Transfer King silber | 250 Transfers | 500.000 | `trades` |
+| 503 | Transfer King gold | 500 Transfers | 1.000.000 | `trades` |
 | 400 | Team value bronze | 125 Mio Teamwert, nur bei positivem Kontostand | 100.000 | `teamValue` |
+| 401 | Team value silber | 150 Mio, nur bei positivem Kontostand | 250.000 | `teamValue` |
+| 402 | Team value gold | 200 Mio, nur bei positivem Kontostand | 500.000 | `teamValue` |
+| 403 | Team value platin | 250 Mio, nur bei positivem Kontostand | 1.000.000 | `teamValue` |
+| 404 | Team value galaktisch | 350 Mio, nur bei positivem Kontostand | 2.000.000 | `teamValue` |
 | 600 | Kreisliga | Liga hat 3 Manager | 1.000.000, **zahlt nicht aufs Konto** | — |
 | 601 | Regionalliga | Liga hat 6 Manager | 1.000.000, **zahlt nicht aufs Konto** | — |
 | 602 | 2. Liga | Liga hat 12 Manager | 1.000.000, **zahlt nicht aufs Konto** | — |
@@ -118,8 +134,10 @@ zählen, werden aus dem aktuellen Stand hergeleitet, nicht aus datierten Feed-Ev
   saisonweit, taugt dafür nicht.
 - **MVP** — braucht einen ligaweiten Vergleich pro Spieler und Spieltag.
 - **Tormaschine** — Tordaten fehlen im Projekt vollständig.
-- **Transfer King und Team value in Silber und Gold** — Schwellen und Beträge unbekannt.
-  Der Katalog ist so gebaut, dass ein Nachtrag reine Zahlenpflege ist.
+Die höheren Stufen von Transfer King und Team value waren beim Entwurf noch unbekannt und
+wurden am 12.08. aus der App nachgereicht. Sie sind enthalten, aber gegen keinen echten
+Kontostand geprüft — betroffen sind aktuell Blida FC und BenjaminScherner, die als
+Einzige die 150-Mio-Stufe überschreiten.
 
 ## Erreichte Erfolge werden mitgeschrieben
 

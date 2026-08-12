@@ -1227,5 +1227,8 @@ git commit -m "docs: say what the estimated balance includes"
 ## Out of Scope
 
 - **Topscorer, Matchwinner, Weltklasse, Fussballgott, MVP, Tormaschine** — the data does not exist in the project.
-- **Transfer King and Team value in silver and gold** — thresholds and amounts unknown.
 - Collapsing the daily bonus rows. 11 rows today, around 280 by the end of the season.
+
+**Added after the plan was written:** the higher tiers of Transfer King and Team value were
+unknown at planning time and were read out of the app on 2026-08-12. They are implemented,
+but no verified balance crosses one of their thresholds, so they rest on that reading alone.

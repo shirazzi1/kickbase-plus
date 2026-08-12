@@ -16,6 +16,7 @@ That last rule is what explained three real balances that no simpler model fit.
 
 import sys
 
+from datetime import datetime, timezone
 from os import path
 
 ### Make the repository root importable regardless of where this is run from
@@ -26,6 +27,10 @@ from backend import miscellaneous
 ### ===============================================================================
 
 PASSED = []
+
+START = datetime(2026, 8, 1, 18, 0, 0, tzinfo=timezone.utc)
+FIRST_RUN = datetime(2026, 8, 12, 14, 0, 0, tzinfo=timezone.utc)
+SECOND_RUN = datetime(2026, 8, 13, 14, 0, 0, tzinfo=timezone.utc)
 
 
 def check(name, fn):
@@ -253,13 +258,6 @@ def test_the_catalogue_has_no_league_size_rewards():
 ### The layer between detect_achievements() and the balance. detect_achievements()
 ### returning three matchday wins proves nothing on its own - what matters is that three
 ### wins also reach the balance three times, and survive the next run.
-
-from datetime import datetime, timezone
-
-START = datetime(2026, 8, 1, 18, 0, 0, tzinfo=timezone.utc)
-FIRST_RUN = datetime(2026, 8, 12, 14, 0, 0, tzinfo=timezone.utc)
-SECOND_RUN = datetime(2026, 8, 13, 14, 0, 0, tzinfo=timezone.utc)
-
 
 def merge(stored, earned, now=FIRST_RUN, start=START):
     return miscellaneous.merge_earned_achievements(stored, earned, now, start)
