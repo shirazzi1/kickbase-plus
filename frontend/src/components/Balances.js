@@ -1,6 +1,7 @@
-import React from "react"
+import React, { useState } from "react"
 
 import PagedDataGrid from "./PagedDataGrid"
+import BalanceEventsDialog from "./BalanceEventsDialog"
 import { currencyFormatter } from "./SharedConstants"
 import Avatar from "@mui/material/Avatar"
 
@@ -8,6 +9,9 @@ import Avatar from "@mui/material/Avatar"
 import data from "../data/balances.json"
 
 function Balances() {
+    // The manager whose balance events are on screen, or null while the dialog is closed
+    const [selectedManager, setSelectedManager] = useState(null)
+
     // Define the columns of the table
     const columns = [
         {
@@ -60,16 +64,22 @@ function Balances() {
             teamValue: row.teamValue,
             balance: row.balance,
             maxBid: row.maxBid,
+            events: row.events,
         }
     ))
 
     // Populate the table
     return (
-        <PagedDataGrid
-            rows={rows}
-            columns={columns}
-            initialState={{ sorting: { sortModel: [{ field: "teamValue", sort: "desc" }] } }}
-        />
+        <>
+            <PagedDataGrid
+                rows={rows}
+                columns={columns}
+                initialState={{ sorting: { sortModel: [{ field: "teamValue", sort: "desc" }] } }}
+                onRowClick={(params) => setSelectedManager(params.row)}
+                sx={{ "& .MuiDataGrid-row": { cursor: "pointer" } }}
+            />
+            <BalanceEventsDialog manager={selectedManager} onClose={() => setSelectedManager(null)} />
+        </>
     )
 }
 
