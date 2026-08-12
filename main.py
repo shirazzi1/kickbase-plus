@@ -827,7 +827,9 @@ def live_points(user_token: str, selected_league: object) -> list:
 
 
 def balances(user_token: str, selected_league: object) -> None:
-    """### Retrieves the estiamted balances for all users in the league. Daily login bonus and money from achievements are not considered.
+    """### Retrieves the estimated balances for all users in the league, together with the
+    events that produced them. Daily login bonus and money from achievements are not
+    considered.
 
     Args:
         user_token (str): The user's kkstrauth token.
@@ -838,14 +840,17 @@ def balances(user_token: str, selected_league: object) -> None:
     initial_balance = float(getenv("START_MONEY", 50000000))
     final_balances = []
 
+    ### Everything from before the season start or league reset belongs to a previous
+    ### season and must not count towards this balance, the same cutoff turnovers() uses.
+    start_datetime = miscellaneous.get_start_datetime()
+
     ### Get all transfers from the API
     all_transfers = leagues.transfers(user_token, selected_league.id)
     logging.debug(f"Found {len(all_transfers)} transfers in total")
 
-    ### Initialize user balances
+    ### Read the league members
     with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
-        user_balances = {user_id: initial_balance for user_id, user_name in league_users.items()}
 
     ### Look the profile pictures up all at once. A user without one costs a full
     ### timeout, so doing them one by one dominated the runtime of this function.
@@ -853,37 +858,16 @@ def balances(user_token: str, selected_league: object) -> None:
 
     ### Loop through all users in the league
     for user_id, user_name in league_users.items():
-        balance = user_balances.get(user_id, initial_balance)
-
-        logging.debug(f"User: {user_name}; Starter balance: {balance}")
-
         user_stats = leagues.user_stats(user_token, selected_league.id, user_id)
         team_value = user_stats["tv"]
         logging.debug(f"Team value of {user_name}: {team_value}")
 
-        ### Check every item in the all_transfers list if it belongs to the current user
-        for item in all_transfers:
-            ### Check if item is a buy or sell transfer
-            if item["t"] == 15:
-                transfer_amount = item["data"]["trp"]
+        ### The events are the balance: the last one carries the current figure, and the
+        ### frontend shows the same list behind the Kontostand column.
+        events = miscellaneous.build_balance_events(all_transfers, user_name, initial_balance, start_datetime)
+        balance = events[-1]["balance"]
 
-                if "byr" in item["data"] and {value: key for key, value in league_users.items()}.get(item["data"]["byr"]) == user_id:
-                    ### User bought a player
-                    balance -= transfer_amount
-
-                    player_last_name = item["data"]["pn"]
-                    logging.debug(f"{user_name} bought {player_last_name} for {transfer_amount}€")
-                    logging.debug(f"New balance: {balance}")
-                elif "slr" in item["data"] and {value: key for key, value in league_users.items()}.get(item["data"]["slr"]) == user_id:
-                    ### User sold a player
-                    balance += transfer_amount
-
-                    player_last_name = item["data"]["pn"]
-                    logging.debug(f"{user_name} sold {player_last_name} for {transfer_amount}€")
-                    logging.debug(f"New balance: {balance}")
-
-        ### Update the user balance
-        user_balances[user_id] = balance
+        logging.debug(f"User: {user_name}; Starter balance: {initial_balance}; Balance after {len(events) - 1} transfer(s): {balance}")
 
         ### Calculate the adjusted team value
         adjusted_team_value = team_value + balance
@@ -906,8 +890,9 @@ def balances(user_token: str, selected_league: object) -> None:
             "username": user_name,
             "profilePic": miscellaneous.get_profilepic(user_id),
             "teamValue": team_value,
-            "balance": round(balance, 0),
+            "balance": balance,
             "maxBid": round(maxbid, 0),
+            "events": events,
         })
 
     logging.info("Got balances.")
