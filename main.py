@@ -521,9 +521,15 @@ def turnovers(user_token: str, selected_league: object) -> None:
     if dropped:
         logging.info(f"Ignored {dropped} transfer(s) from before START_DATE ({start_datetime.isoformat()}).")
 
-    ### Save updated transfers back to all_transfers.json
+    ### Save updated transfers back to all_transfers.json.
+    ### The cache stays the raw record of what the API said. Reverted bookings are
+    ### dropped below, for the calculation only, so a later correction can still be seen.
     miscellaneous.write_json_to_file(all_transfers, "all_transfers.json")
     logging.debug("Updated all_transfers.json with new transfers")
+
+    ### A booking an admin reverted stays in the feed, and an unpaired leftover sale would
+    ### have a start of season market value invented for it as its buy price
+    all_transfers = miscellaneous.drop_reverted_transfers(all_transfers)
 
     ### Process the transfers as usual
     transfers = []
@@ -847,6 +853,9 @@ def balances(user_token: str, selected_league: object) -> None:
     ### Get all transfers from the API
     all_transfers = leagues.transfers(user_token, selected_league.id)
     logging.debug(f"Found {len(all_transfers)} transfers in total")
+
+    ### A booking an admin reverted stays in the feed, so it would be counted twice
+    all_transfers = miscellaneous.drop_reverted_transfers(all_transfers)
 
     ### Read the league members
     with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:

@@ -303,6 +303,81 @@ def filter_transfers_from(transfers: list, cutoff: datetime) -> list:
     return [item for item in transfers if parse_feed_timestamp(item["dt"]) >= cutoff]
 
 
+### Sentinel for "nobody has bought this player yet", which is not the same as "free".
+### A manager selling a player nobody ever bought had them assigned at the season start.
+_UNCLAIMED = object()
+
+
+def drop_reverted_transfers(transfers: list) -> list:
+    """### Drop activity feed bookings that a league admin reverted.
+
+    Kickbase emits no cancellation event. A reverted transfer stays in the feed next to
+    the booking that replaced it, and both get counted: the seller is paid twice, the
+    buyer charged twice, and turnovers() invents a second sale out of the leftover.
+
+    Ownership is what gives it away, because nobody can sell a player they do not own.
+    Replaying each player's chain finds the contradiction, and the later booking is the
+    one that stuck - verified against the live squads for the 2026-08-08 incident in
+    league Kickbase-Elite 26/27.
+
+    A reversal with no replacement booking leaves no contradiction behind and cannot be
+    found this way. Only the live squads would show it.
+
+    Args:
+        transfers (list): Activity feed items with "t" == 15, in any order.
+
+    Returns:
+        list: The surviving items, in the order they were passed in.
+    """
+    def owner_after(item):
+        """Who holds the player once this booking went through. None means Kickbase."""
+        return item["data"].get("byr")
+
+    def is_possible(item, owner):
+        """Whether this booking can follow on from the current owner."""
+        seller = item["data"].get("slr")
+
+        if seller is not None:
+            ### Selling requires owning, or having been assigned the player at the start
+            return owner is _UNCLAIMED or owner == seller
+
+        ### Buying off the market requires the player to be on it
+        return owner is _UNCLAIMED or owner is None
+
+    by_player = {}
+    for item in sorted(transfers, key=lambda item: parse_feed_timestamp(item["dt"])):
+        by_player.setdefault(item["data"]["pi"], []).append(item)
+
+    reverted = set()
+
+    for player_id, chain in by_player.items():
+        kept = []
+        ### owners[-1] is the owner after everything in kept; owners[0] is the start state
+        owners = [_UNCLAIMED]
+
+        for item in chain:
+            ### Walk back over already accepted bookings until this one becomes possible.
+            ### Never past the start of the chain: dropping everything would lose more
+            ### than the reversal did.
+            while not is_possible(item, owners[-1]) and kept:
+                dropped = kept.pop()
+                owners.pop()
+                reverted.add(dropped["i"])
+
+                logging.warning(
+                    f"Ignoring reverted booking {dropped['i']} from {dropped['dt']}: "
+                    f"{dropped['data'].get('pn')} for {dropped['data']['trp']}€ "
+                    f"(seller {dropped['data'].get('slr') or 'Kickbase'}, "
+                    f"buyer {dropped['data'].get('byr') or 'Kickbase'}). It contradicts "
+                    f"booking {item['i']} from {item['dt']}, which superseded it."
+                )
+
+            kept.append(item)
+            owners.append(owner_after(item))
+
+    return [item for item in transfers if item["i"] not in reverted]
+
+
 def build_balance_events(transfers: list, user_name: str, initial_balance: float, start_datetime: datetime) -> list:
     """### Build the list of events that produced a manager's balance.
 
