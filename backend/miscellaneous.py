@@ -46,12 +46,19 @@ LOGIN_BONUS_CAP = 100_000
 ### real balances only add up without them, and a cutoff at the league reset cannot
 ### explain it either, since "First deal" was awarded before the reset too and does count.
 ###
-### Also missing: the silver and gold tiers of Transfer King and Team value, whose
-### thresholds and amounts are unknown. Adding them is a line each.
+### Ids 400, 500 and 501 are Kickbase's own, read off type 26 feed events. The rest are
+### ours: those achievements never appeared in a feed we could read, so there was no id to
+### copy. They are only ever used as keys into achievements.json.
 ACHIEVEMENTS = {
     500: {"name": "First deal", "amount": 100_000},
     501: {"name": "Transfer King bronze", "amount": 250_000},
+    502: {"name": "Transfer King silber", "amount": 500_000},
+    503: {"name": "Transfer King gold", "amount": 1_000_000},
     400: {"name": "Team value bronze", "amount": 100_000},
+    401: {"name": "Team value silber", "amount": 250_000},
+    402: {"name": "Team value gold", "amount": 500_000},
+    403: {"name": "Team value platin", "amount": 1_000_000},
+    404: {"name": "Team value galaktisch", "amount": 2_000_000},
     700: {"name": "Spieltagssieger", "amount": 1_000_000},
     701: {"name": "Spieltagspunkte Silber", "amount": 250_000},
     702: {"name": "Spieltagspunkte Gold", "amount": 500_000},
@@ -60,11 +67,12 @@ ACHIEVEMENTS = {
     801: {"name": "Vizemeister", "amount": 1_000_000},
 }
 
-### Minimum trades for the transfer count achievements. Trades between managers count.
-TRANSFER_KING_BRONZE_TRADES = 50
+### Trades needed per tier. Trades between managers count towards these.
+TRANSFER_TIERS = [(1, 500), (50, 501), (250, 502), (500, 503)]
 
-### Team value achievements need this much value, and a balance in the black
-TEAM_VALUE_BRONZE = 125_000_000
+### Team value needed per tier. All of them also require a balance in the black.
+TEAM_VALUE_TIERS = [(125_000_000, 400), (150_000_000, 401), (200_000_000, 402),
+                    (250_000_000, 403), (350_000_000, 404)]
 
 ### Profit with a single player and what it pays. Tiers stack, so 6 Mio pays the first two.
 ### The threshold doubles as the id: these never appeared in the feed, so there is no
@@ -577,15 +585,17 @@ def detect_achievements(trades: int, team_value: float, balance: float, turnover
             "amount": amount if amount is not None else entry["amount"],
         })
 
-    if trades >= 1:
-        award(500)
+    ### Tiers stack: 250 trades earn the first deal and both Transfer King tiers below it
+    for threshold, achievement_id in TRANSFER_TIERS:
+        if trades >= threshold:
+            award(achievement_id)
 
-    if trades >= TRANSFER_KING_BRONZE_TRADES:
-        award(501)
-
-    ### Withheld in the red. This is the rule that explained three real balances.
-    if team_value >= TEAM_VALUE_BRONZE and balance > 0:
-        award(400)
+    ### Withheld in the red, whatever the team value. This is the rule that explained
+    ### three real balances that no simpler model fit.
+    if balance > 0:
+        for threshold, achievement_id in TEAM_VALUE_TIERS:
+            if team_value >= threshold:
+                award(achievement_id)
 
     ### One entry per win: the only repeatable achievement we can derive
     for _ in range(matchday_wins):

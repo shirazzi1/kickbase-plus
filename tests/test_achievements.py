@@ -93,6 +93,43 @@ def test_forty_nine_trades_do_not():
     assert ids(detect(trades=49)) == [500], "expected Transfer King to need fifty trades"
 
 
+def test_transfer_tiers_stack():
+    ### 250 trades clear First deal, bronze and silver, but not the 500 of gold
+    earned = detect(trades=250)
+
+    assert ids(earned) == [500, 501, 502], f"expected three tiers, got {earned}"
+    assert total(earned) == 100_000 + 250_000 + 500_000, f"expected 850000, got {earned}"
+
+
+def test_five_hundred_trades_earn_transfer_king_gold():
+    earned = detect(trades=500)
+
+    assert ids(earned) == [500, 501, 502, 503], f"expected all four tiers, got {earned}"
+    assert total(earned) == 1_850_000, f"expected 1850000, got {earned}"
+
+
+def test_team_value_tiers_stack():
+    ### 250 Mio clears bronze, silver, gold and platinum, but not the 350 Mio of the top
+    earned = detect(trades=0, team_value=250_000_000, balance=1)
+
+    assert ids(earned) == [400, 401, 402, 403], f"expected four tiers, got {earned}"
+    assert total(earned) == 100_000 + 250_000 + 500_000 + 1_000_000, \
+        f"expected 1850000, got {earned}"
+
+
+def test_the_top_team_value_tier():
+    earned = detect(trades=0, team_value=350_000_000, balance=1)
+
+    assert ids(earned) == [400, 401, 402, 403, 404], f"expected all five tiers, got {earned}"
+    assert total(earned) == 3_850_000, f"expected 3850000, got {earned}"
+
+
+def test_every_team_value_tier_is_withheld_in_the_red():
+    ### The rule applies to the whole family, not just to bronze
+    assert detect(trades=0, team_value=350_000_000, balance=-1) == [], \
+        "expected no team value reward at all with a negative balance"
+
+
 def test_team_value_pays_with_a_positive_balance():
     earned = detect(trades=1, team_value=125_000_000, balance=1)
 
@@ -262,6 +299,13 @@ if __name__ == "__main__":
     check("the first trade earns First deal", test_the_first_trade_earns_first_deal)
     check("fifty trades earn Transfer King", test_fifty_trades_earn_transfer_king)
     check("forty nine trades do not", test_forty_nine_trades_do_not)
+    check("transfer tiers stack", test_transfer_tiers_stack)
+    check("five hundred trades earn Transfer King gold",
+          test_five_hundred_trades_earn_transfer_king_gold)
+    check("team value tiers stack", test_team_value_tiers_stack)
+    check("the top team value tier", test_the_top_team_value_tier)
+    check("every team value tier is withheld in the red",
+          test_every_team_value_tier_is_withheld_in_the_red)
     check("team value pays with a positive balance", test_team_value_pays_with_a_positive_balance)
     check("team value is withheld with a negative balance",
           test_team_value_is_withheld_with_a_negative_balance)
