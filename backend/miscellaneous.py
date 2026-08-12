@@ -39,6 +39,46 @@ PLAYER_IMAGE_BASE_URL = "https://kickbase.b-cdn.net/"
 LOGIN_BONUS_STEP = 10_000
 LOGIN_BONUS_CAP = 100_000
 
+### Achievement rewards, from help.kickbase.com/help/erfolge.
+###
+### Not in here on purpose: the league size achievements (600 Kreisliga, 601 Regionalliga,
+### 602 2. Liga). The app shows 1.000.000 each, but they do not reach the balance - three
+### real balances only add up without them, and a cutoff at the league reset cannot
+### explain it either, since "First deal" was awarded before the reset too and does count.
+###
+### Also missing: the silver and gold tiers of Transfer King and Team value, whose
+### thresholds and amounts are unknown. Adding them is a line each.
+ACHIEVEMENTS = {
+    500: {"name": "First deal", "amount": 100_000},
+    501: {"name": "Transfer King bronze", "amount": 250_000},
+    400: {"name": "Team value bronze", "amount": 100_000},
+    700: {"name": "Spieltagssieger", "amount": 1_000_000},
+    701: {"name": "Spieltagspunkte Silber", "amount": 250_000},
+    702: {"name": "Spieltagspunkte Gold", "amount": 500_000},
+    703: {"name": "Jahrhundertspiel", "amount": 1_000_000},
+    800: {"name": "Meister", "amount": 2_000_000},
+    801: {"name": "Vizemeister", "amount": 1_000_000},
+}
+
+### Minimum trades for the transfer count achievements. Trades between managers count.
+TRANSFER_KING_BRONZE_TRADES = 50
+
+### Team value achievements need this much value, and a balance in the black
+TEAM_VALUE_BRONZE = 125_000_000
+
+### Profit with a single player and what it pays. Tiers stack, so 6 Mio pays the first two.
+### The threshold doubles as the id: these never appeared in the feed, so there is no
+### Kickbase id to reuse and none to collide with.
+LUCKY_TOUCH_TIERS = [
+    (3_000_000, "Bronzenes Händchen", 250_000),
+    (5_000_000, "Silbernes Händchen", 500_000),
+    (10_000_000, "Goldenes Händchen", 1_000_000),
+    (25_000_000, "Königstransfer", 2_000_000),
+]
+
+### Points in a single matchday and the achievement they earn. Tiers stack.
+MATCHDAY_POINT_TIERS = [(1_000, 701), (1_500, 702), (2_000, 703)]
+
 ### Per-run cache for profile pictures. Each lookup downloads the full image, and both
 ### balances() and league_user_stats_tables() ask for every user.
 _profilepic_cache = {}
@@ -500,6 +540,163 @@ def build_login_bonus_events(start_datetime: datetime, until: datetime) -> list:
         })
 
     return events
+
+
+def detect_achievements(trades: int, team_value: float, balance: float, turnovers: list,
+                        matchday_wins: int, matchday_points: list, placement: int,
+                        season_over: bool) -> list:
+    """### Work out which achievements a manager has earned.
+
+    Only the ones that can be derived from data the project already fetches. Every
+    achievement counts once per season, except the matchday win, which pays per win.
+
+    Args:
+        trades (int): Transfers made this season. Trades between managers count.
+        team_value (float): The manager's current team value.
+        balance (float): The manager's balance. Team value rewards are withheld when it
+            is negative.
+        turnovers (list): The manager's buy/sell pairs, as turnovers.json holds them.
+        matchday_wins (int): How many matchdays the manager won.
+        matchday_points (list): Points scored on each matchday played so far.
+        placement (int): The manager's position in the league.
+        season_over (bool): Whether every matchday has been played. The season titles pay
+            only then, since the placement moves until the last whistle.
+
+    Returns:
+        list: Dicts of {"id", "name", "amount"} for everything earned.
+    """
+    earned = []
+
+    def award(achievement_id, name=None, amount=None):
+        """Record one earned achievement, defaulting to the catalogue entry."""
+        entry = ACHIEVEMENTS.get(achievement_id, {})
+
+        earned.append({
+            "id": achievement_id,
+            "name": name or entry["name"],
+            "amount": amount if amount is not None else entry["amount"],
+        })
+
+    if trades >= 1:
+        award(500)
+
+    if trades >= TRANSFER_KING_BRONZE_TRADES:
+        award(501)
+
+    ### Withheld in the red. This is the rule that explained three real balances.
+    if team_value >= TEAM_VALUE_BRONZE and balance > 0:
+        award(400)
+
+    ### One entry per win: the only repeatable achievement we can derive
+    for _ in range(matchday_wins):
+        award(700)
+
+    ### The best single matchday decides which point tiers were reached, each once
+    best_matchday = max(matchday_points, default=0)
+    for threshold, achievement_id in MATCHDAY_POINT_TIERS:
+        if best_matchday >= threshold:
+            award(achievement_id)
+
+    ### The placement only settles once the last matchday has been played
+    if season_over and placement == 1:
+        award(800)
+    elif season_over and placement == 2:
+        award(801)
+
+    ### The lucky touch family. Both sides have to go through the market, the player must
+    ### not have been assigned at the start, and the best single profit decides which
+    ### tiers are reached - each of them once for the whole season.
+    best_profit = 0
+    for buy, sell in turnovers:
+        if buy.get("type") == "assigned_at_start":
+            continue
+        if buy.get("tradePartner") != "Kickbase" or sell.get("tradePartner") != "Kickbase":
+            continue
+
+        best_profit = max(best_profit, sell["price"] - buy["price"])
+
+    for threshold, name, amount in LUCKY_TOUCH_TIERS:
+        if best_profit >= threshold:
+            award(threshold, name=name, amount=amount)
+
+    return earned
+
+
+def merge_balance_events(*streams) -> list:
+    """### Merge event streams into one chronological list with a running balance.
+
+    The streams come from build_balance_events(), build_login_bonus_events() and the
+    achievement events. Each event carries its own "amount"; the balance is recomputed
+    across the merge, because a bonus between two transfers shifts everything after it.
+
+    Args:
+        *streams (list): Event lists, each in the shape build_balance_events() produces.
+
+    Returns:
+        list: A new list of new dicts, oldest first, with "balance" filled in.
+    """
+    merged = sorted(
+        (dict(event) for stream in streams for event in stream),
+        key=lambda event: parse_feed_timestamp(event["date"]),
+    )
+
+    balance = 0
+    for event in merged:
+        balance += event["amount"]
+        event["balance"] = round(balance)
+
+    return merged
+
+
+def matchday_points(performance: dict) -> list:
+    """### Read the points a manager scored on each matchday played.
+
+    The performance response nests a list of seasons, each holding its matchdays. Only
+    matchdays that have been played carry "mdp".
+
+    Args:
+        performance (dict): A /managers/{id}/performance response.
+
+    Returns:
+        list: Points per played matchday, current season only.
+    """
+    seasons = performance.get("it") or []
+
+    if not seasons:
+        return []
+
+    ### The current season is the last one in the list
+    return [day["mdp"] for day in seasons[-1].get("it", []) if "mdp" in day]
+
+
+def season_is_over(now: datetime) -> bool:
+    """### Whether every matchday of the season has been played.
+
+    Reads match_days.json, which team_value_per_match_day() writes. Without it there is
+    no way to tell, and treating the season as running is the safe answer: it only
+    withholds the season titles.
+
+    Args:
+        now (datetime): The instant to judge against.
+
+    Returns:
+        bool: True once the last match of the season is over.
+    """
+    match_days_path = path.join(DATA_DIR, "match_days.json")
+
+    if not path.exists(match_days_path):
+        return False
+
+    try:
+        with open(match_days_path, "r") as f:
+            match_days = json.load(f)
+    except json.JSONDecodeError:
+        return False
+
+    if not match_days:
+        return False
+
+    return parse_feed_timestamp(match_days[-1]["lastMatch"]) < now
 
 
 def write_json_to_file(data, file_name: str) -> None:
