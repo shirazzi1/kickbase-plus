@@ -9,6 +9,7 @@ import json
 import logging
 
 import pandas as pd
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta, timezone
 from os import getenv, path, makedirs
@@ -592,6 +593,10 @@ def detect_achievements(trades: int, team_value: float, balance: float, turnover
 
     ### Withheld in the red, whatever the team value. This is the rule that explained
     ### three real balances that no simpler model fit.
+    ###
+    ### The boundary is a guess: the FAQ says "positive account balance", which reads as
+    ### strictly greater than zero, and none of the three managers sat at exactly zero to
+    ### settle it. If a reward ever goes missing at a balance of 0, this is the line.
     if balance > 0:
         for threshold, achievement_id in TEAM_VALUE_TIERS:
             if team_value >= threshold:
@@ -630,6 +635,50 @@ def detect_achievements(trades: int, team_value: float, balance: float, turnover
             award(threshold, name=name, amount=amount)
 
     return earned
+
+
+def merge_earned_achievements(stored: list, earned_now: list, now: datetime, start_datetime: datetime) -> list:
+    """### Fold the achievements detected in this run into the ones already on record.
+
+    Two things have to survive, and keying by id alone loses one of them:
+
+    - **The date of the first sighting.** Most achievements cannot be dated from the data
+      we have, so the moment we first saw one is the best date there is.
+    - **The count.** The matchday win pays once per win, so three wins have to stay three
+      entries. Folding them into one would freeze the counter for the rest of the season,
+      because the single stored entry then satisfies every later run.
+
+    Entries earned before start_datetime belong to a previous season or to the state
+    before a league reset and are dropped, the same cutoff the transfers use. Without it
+    they would keep paying, and merge_balance_events() would sort them in front of the
+    starting budget, which breaks reading the balance column downwards.
+
+    Args:
+        stored (list): What achievements.json holds for this manager, each with "earnedAt".
+        earned_now (list): What detect_achievements() returned, without a date.
+        now (datetime): The date to stamp on newly sighted achievements.
+        start_datetime (datetime): The season start or league reset instant.
+
+    Returns:
+        list: The merged record, oldest first, ready to be written back.
+    """
+    kept = [a for a in stored if parse_feed_timestamp(a["earnedAt"]) >= start_datetime]
+
+    expired = len(stored) - len(kept)
+    if expired:
+        logging.info(f"Ignoring {expired} achievement(s) earned before {start_datetime.isoformat()}.")
+
+    on_record = Counter((a["id"], a["name"]) for a in kept)
+    detected = Counter((a["id"], a["name"]) for a in earned_now)
+    template = {(a["id"], a["name"]): a for a in earned_now}
+
+    ### Only the surplus is new. A repeatable achievement seen three times but recorded
+    ### twice adds one entry, not three.
+    for key, count in detected.items():
+        for _ in range(count - on_record[key]):
+            kept.append({**template[key], "earnedAt": now.isoformat()})
+
+    return sorted(kept, key=lambda a: a["earnedAt"])
 
 
 def merge_balance_events(*streams) -> list:

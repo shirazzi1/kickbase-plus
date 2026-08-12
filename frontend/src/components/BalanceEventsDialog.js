@@ -145,7 +145,10 @@ function BalanceEventsDialog({ manager, withBonuses, onClose }) {
             </DialogTitle>
             <DialogContent>
                 <Box sx={{ ...deltaColumnStyles, "& .estimated-event": { fontStyle: "italic", opacity: 0.75 } }}>
-                    <PagedDataGrid rows={rows} columns={columns} />
+                    {/* The key remounts the grid when the list changes. PagedDataGrid
+                        reads rows.length once, on mount, so without it a switch flipped
+                        while the dialog is open would leave the old page size behind. */}
+                    <PagedDataGrid key={withBonuses ? "bonuses" : "transfers"} rows={rows} columns={columns} />
                 </Box>
             </DialogContent>
             <DialogActions>

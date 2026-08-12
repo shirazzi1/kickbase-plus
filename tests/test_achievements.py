@@ -250,6 +250,76 @@ def test_the_catalogue_has_no_league_size_rewards():
 
 ### ===============================================================================
 
+### The layer between detect_achievements() and the balance. detect_achievements()
+### returning three matchday wins proves nothing on its own - what matters is that three
+### wins also reach the balance three times, and survive the next run.
+
+from datetime import datetime, timezone
+
+START = datetime(2026, 8, 1, 18, 0, 0, tzinfo=timezone.utc)
+FIRST_RUN = datetime(2026, 8, 12, 14, 0, 0, tzinfo=timezone.utc)
+SECOND_RUN = datetime(2026, 8, 13, 14, 0, 0, tzinfo=timezone.utc)
+
+
+def merge(stored, earned, now=FIRST_RUN, start=START):
+    return miscellaneous.merge_earned_achievements(stored, earned, now, start)
+
+
+def test_three_matchday_wins_stay_three_entries():
+    earned = detect(trades=0, matchday_wins=3)
+    record = merge([], earned)
+
+    wins = [a for a in record if a["id"] == 700]
+    assert len(wins) == 3, f"expected three wins on record, got {record}"
+    assert sum(a["amount"] for a in record) == 3_000_000, f"expected 3 million, got {record}"
+
+
+def test_a_second_run_adds_nothing():
+    ### The bug this guards against froze the counter for the whole season
+    record = merge([], detect(trades=0, matchday_wins=3))
+    again = merge(record, detect(trades=0, matchday_wins=3), now=SECOND_RUN)
+
+    assert len(again) == 3, f"expected the record to stay at three, got {again}"
+
+
+def test_a_further_win_adds_exactly_one():
+    record = merge([], detect(trades=0, matchday_wins=3))
+    after = merge(record, detect(trades=0, matchday_wins=4), now=SECOND_RUN)
+
+    assert len(after) == 4, f"expected a fourth entry, got {after}"
+    assert sum(a["amount"] for a in after) == 4_000_000, f"expected 4 million, got {after}"
+
+
+def test_the_date_of_the_first_sighting_is_kept():
+    record = merge([], detect(trades=1))
+    again = merge(record, detect(trades=1), now=SECOND_RUN)
+
+    assert again[0]["earnedAt"] == FIRST_RUN.isoformat(), \
+        f"expected the first sighting to survive, got {again}"
+
+
+def test_achievements_from_before_the_season_are_dropped():
+    ### They survive a league reset in achievements.json and would keep paying, and
+    ### merge_balance_events() would sort them in front of the starting budget
+    old = [{"id": 500, "name": "First deal", "amount": 100_000,
+            "earnedAt": "2026-05-20T12:00:00+00:00"}]
+
+    assert merge(old, []) == [], f"expected the previous season to be dropped, got {merge(old, [])}"
+
+
+def test_an_achievement_earned_after_the_reset_survives():
+    fresh = [{"id": 500, "name": "First deal", "amount": 100_000,
+              "earnedAt": "2026-08-05T12:00:00+00:00"}]
+
+    assert merge(fresh, []) == fresh, f"expected it to stay, got {merge(fresh, [])}"
+
+
+def test_merging_nothing_into_nothing_is_empty():
+    assert merge([], []) == [], "expected an empty record"
+
+
+### ===============================================================================
+
 def test_merge_recomputes_the_running_balance():
     transfers = [
         {"date": "2026-08-01T18:00:00+00:00", "type": "start", "amount": 50_000_000,
@@ -330,6 +400,17 @@ if __name__ == "__main__":
     check("third place earns no title", test_third_place_earns_no_title)
     check("the catalogue has no league size rewards",
           test_the_catalogue_has_no_league_size_rewards)
+
+    print("\nmerge_earned_achievements()")
+    check("three matchday wins stay three entries", test_three_matchday_wins_stay_three_entries)
+    check("a second run adds nothing", test_a_second_run_adds_nothing)
+    check("a further win adds exactly one", test_a_further_win_adds_exactly_one)
+    check("the date of the first sighting is kept", test_the_date_of_the_first_sighting_is_kept)
+    check("achievements from before the season are dropped",
+          test_achievements_from_before_the_season_are_dropped)
+    check("an achievement earned after the reset survives",
+          test_an_achievement_earned_after_the_reset_survives)
+    check("merging nothing into nothing is empty", test_merging_nothing_into_nothing_is_empty)
 
     print("\nmerge_balance_events()")
     check("recomputes the running balance", test_merge_recomputes_the_running_balance)
