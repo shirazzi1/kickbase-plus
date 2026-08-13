@@ -8,6 +8,7 @@ import requests
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 
@@ -964,6 +965,46 @@ HISTORICISED_DATASETS = frozenset({
 })
 
 
+### The zone to fall back on when TZ is unset or unusable. Same default the rest of the
+### project assumes.
+DEFAULT_TIMEZONE = "Europe/Berlin"
+
+
+def history_timezone() -> ZoneInfo:
+    """### The timezone the history store files its lines under.
+
+    Resolves TZ, and falls back to DEFAULT_TIMEZONE rather than raising when it cannot be
+    used. Three ways it cannot:
+
+      - `TZ=""`. getenv() hands back the empty string, not the default, and ZoneInfo("")
+        raises ValueError.
+      - `TZ` in POSIX form, e.g. "CET-1CEST,M3.5.0,M10.5.0/3". Legal for libc, and the
+        tzdata lookup raises ZoneInfoNotFoundError - which subclasses KeyError, so it
+        slips past a handler that only expects OSError and friends.
+      - A plain typo, or a container image with no tzdata installed at all.
+
+    A wrong-by-an-hour boundary between two day files is a rounding error at the edge of a
+    day. A raised exception here used to cost the whole line, and the store has no backfill,
+    so falling back is strictly the better trade.
+
+    Returns:
+        ZoneInfo: The app timezone, or DEFAULT_TIMEZONE if TZ cannot be resolved.
+    """
+    ### "or", not getenv's default argument: an empty TZ has to fall back too
+    name = getenv("TZ") or DEFAULT_TIMEZONE
+
+    try:
+        return ZoneInfo(name)
+    except Exception as e:
+        if name != DEFAULT_TIMEZONE:
+            logging.warning(
+                f"TZ '{name}' cannot be used to date the history store ({type(e).__name__}: "
+                f"{e}). Falling back to {DEFAULT_TIMEZONE}."
+            )
+            return ZoneInfo(DEFAULT_TIMEZONE)
+        raise
+
+
 def history_file_path(dataset: str, moment: datetime = None) -> str:
     """### Where the history of one dataset for one day lives.
 
@@ -980,13 +1021,52 @@ def history_file_path(dataset: str, moment: datetime = None) -> str:
         dataset (str): The dataset name without the ".json", e.g. "market".
         moment (datetime): The instant to file the line under, normally now.
 
+    Raises:
+        ValueError: If the dataset name could not be used as a directory name. Refused
+            rather than sanitised: the name becomes a path segment, and the diff engine will
+            read this store by name, so a "../.." that quietly resolved would read and write
+            outside the mounted volume. Every real dataset name is plain word characters,
+            so nothing legitimate is turned away.
+
     Returns:
         str: The absolute path of the NDJSON file, whose directory may not exist yet.
     """
+    if not dataset or not re.fullmatch(r"[A-Za-z0-9_-]+", dataset):
+        raise ValueError(
+            f"'{dataset}' cannot be a history dataset name: only letters, digits, "
+            "underscores and dashes, so the name can never leave HISTORY_DIR."
+        )
+
     moment = moment or datetime.now(timezone.utc)
-    day = moment.astimezone(ZoneInfo(getenv("TZ", "Europe/Berlin")))
+    day = moment.astimezone(history_timezone())
 
     return path.join(HISTORY_DIR, dataset, f"{day.strftime('%Y-%m-%d')}.ndjson")
+
+
+def _lacks_trailing_newline(file_path: str) -> bool:
+    """### Whether a history file ends mid-line, so the next append needs its own newline.
+
+    Only true after an append was cut short - the host died between the write() and the
+    line reaching the disk. Appending straight onto that glues the broken half to an intact
+    line and produces one line that parses as neither, so a single crash would cost two
+    runs instead of one.
+
+    Args:
+        file_path (str): The history file about to be appended to.
+
+    Returns:
+        bool: False if the file does not exist or is empty, which is the normal case for
+            the first run of a day.
+    """
+    try:
+        if path.getsize(file_path) == 0:
+            return False
+    except OSError:
+        return False
+
+    with open(file_path, "rb") as f:
+        f.seek(-1, os.SEEK_END)
+        return f.read(1) != b"\n"
 
 
 def _append_history(file_name: str, data) -> None:
@@ -1019,15 +1099,32 @@ def _append_history(file_name: str, data) -> None:
     if dataset not in HISTORICISED_DATASETS:
         return
 
-    now = datetime.now(ZoneInfo(getenv("TZ", "Europe/Berlin")))
-    file_path = history_file_path(dataset, now)
-
+    ### Everything below is inside the try, and the try catches Exception rather than a list
+    ### of the failures that came to mind. The caller has already replaced the data file at
+    ### this point, so anything that escapes from here reports a write that did happen as a
+    ### stage that failed - a lie in the manifest, and a lie in the direction of "restart it"
+    ### rather than "look at it". Resolving TZ used to sit outside this block and could raise
+    ### ZoneInfoNotFoundError, which is a KeyError and slipped past a narrow handler twice
+    ### over.
     try:
+        now = datetime.now(history_timezone())
+        file_path = history_file_path(dataset, now)
+
         ### Built in full before the file is opened, so a serialisation failure cannot
         ### leave half a line behind
         line = json.dumps({"ts": now.isoformat(), "rows": data}, separators=(",", ":")) + "\n"
 
         makedirs(path.dirname(file_path), exist_ok=True)
+
+        ### A file that ends mid-line is the fingerprint of an append cut short. Starting a
+        ### fresh line keeps that damage confined to the one broken line instead of taking
+        ### the next intact one down with it.
+        if _lacks_trailing_newline(file_path):
+            logging.warning(
+                f"The {dataset} history for today ends mid-line, so an earlier append was "
+                "cut short. Starting a new line; the broken one stays unreadable."
+            )
+            line = "\n" + line
 
         with open(file_path, "a") as f:
             f.write(line)
@@ -1035,8 +1132,11 @@ def _append_history(file_name: str, data) -> None:
             ### a line lost for good if the host goes down, so it goes to the disk now.
             f.flush()
             os.fsync(f.fileno())
-    except (OSError, TypeError, ValueError) as e:
-        logging.warning(f"Could not append {dataset} to the history store: {e}")
+    except Exception as e:
+        logging.warning(
+            f"Could not append {dataset} to the history store, carrying on: "
+            f"{type(e).__name__}: {e}"
+        )
         return
 
     logging.debug(f"Appended a {dataset} snapshot to {file_path}")

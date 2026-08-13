@@ -21,7 +21,7 @@ import sys
 import tempfile
 
 from datetime import datetime, timedelta, timezone
-from os import listdir, makedirs, path
+from os import environ, listdir, makedirs, path
 
 ### Make the repository root importable regardless of where this is run from
 sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
@@ -342,6 +342,143 @@ def test_the_last_good_snapshot_still_happens():
             f"got {miscellaneous.read_last_good('market.json')}"
 
 
+def test_any_failure_in_the_append_leaves_the_write_a_success():
+    """The data file is already replaced by the time the append runs, so anything escaping
+    from it reports a write that did happen as a failed stage - and a failed stage reads as
+    "restart the container", which would not have helped."""
+    with TempDirs() as dirs:
+        original = miscellaneous.history_file_path
+
+        def boom(*args, **kwargs):
+            ### Deliberately not an OSError: the handler used to list the exception types it
+            ### expected, and this is the shape of the one it did not expect
+            raise RuntimeError("something nobody thought of")
+
+        miscellaneous.history_file_path = boom
+        try:
+            miscellaneous.write_json_to_file([{"i": "1"}], "market.json")
+        finally:
+            miscellaneous.history_file_path = original
+
+        with open(path.join(dirs.data_dir, "market.json")) as f:
+            assert json.load(f) == [{"i": "1"}], "the write has to stand"
+
+
+### ===============================================================================
+### A hostile environment
+### ===============================================================================
+
+
+class BrokenTZ:
+    """Set TZ to something libc accepts and the tzdata lookup does not."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __enter__(self):
+        self.original = environ.get("TZ")
+        environ["TZ"] = self.value
+        return self
+
+    def __exit__(self, *exc):
+        if self.original is None:
+            environ.pop("TZ", None)
+        else:
+            environ["TZ"] = self.original
+        return False
+
+
+def test_an_unusable_tz_does_not_fail_the_write():
+    """TZ="" hands getenv() the empty string rather than its default, and a POSIX style TZ
+    raises ZoneInfoNotFoundError - a KeyError, so it slips past a narrow handler. Either
+    used to be raised after the data file had already been replaced."""
+    for tz in ("", "CET-1CEST,M3.5.0,M10.5.0/3", "Nonsense/Zone", "/etc/localtime"):
+        with TempDirs() as dirs, BrokenTZ(tz):
+            miscellaneous.write_json_to_file([{"i": "1"}], "market.json")
+
+            with open(path.join(dirs.data_dir, "market.json")) as f:
+                assert json.load(f) == [{"i": "1"}], f"TZ={tz!r} broke the write"
+
+
+def test_an_unusable_tz_still_records_the_line():
+    """Falling back to the default zone beats losing the line: a day boundary an hour off is
+    a rounding error, a missing line is unrecoverable."""
+    for tz in ("", "CET-1CEST,M3.5.0,M10.5.0/3"):
+        with TempDirs() as dirs, BrokenTZ(tz):
+            miscellaneous.write_json_to_file([{"i": "1"}], "market.json")
+
+            lines = dirs.lines("market")
+            assert len(lines) == 1, f"TZ={tz!r} cost the line, got {lines}"
+            assert lines[0]["rows"] == [{"i": "1"}], f"got {lines[0]}"
+
+
+def test_a_dataset_name_cannot_leave_the_store():
+    """The name becomes a path segment, and the diff engine will read this store by name."""
+    with TempDirs():
+        for hostile in ("../../etc", "..", "a/b", "", "market/../../x"):
+            try:
+                miscellaneous.history_file_path(hostile)
+            except ValueError:
+                continue
+
+            raise AssertionError(f"'{hostile}' was accepted as a dataset name")
+
+
+def test_a_real_dataset_name_is_accepted():
+    """The guard is worthless if it turns away the names actually in use."""
+    with TempDirs() as dirs:
+        for dataset in sorted(miscellaneous.HISTORICISED_DATASETS):
+            assert miscellaneous.history_file_path(dataset).startswith(dirs.history_dir), \
+                f"{dataset} was refused or filed outside the store"
+
+
+### ===============================================================================
+### Recovering from a half written line
+### ===============================================================================
+
+
+def test_a_half_written_line_does_not_swallow_the_next_one():
+    """A host that dies mid append leaves the file without its closing newline. Appending
+    straight onto that fuses the broken half and the next intact line into one that parses
+    as neither, so one crash would cost two runs."""
+    with TempDirs() as dirs:
+        miscellaneous.write_json_to_file([{"i": "first"}], "market.json")
+
+        ### Cut the second line short, exactly as a crash between write() and fsync would
+        with open(miscellaneous.history_file_path("market"), "a") as f:
+            f.write('{"ts": "2026-08-13T14:10:00+02:00", "rows": [{"i": "cut')
+
+        miscellaneous.write_json_to_file([{"i": "third"}], "market.json")
+
+        with open(miscellaneous.history_file_path("market")) as f:
+            raw = [line for line in f.read().splitlines() if line.strip()]
+
+        parsed = []
+        for line in raw:
+            try:
+                parsed.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+        assert len(raw) == 3, f"expected three physical lines, got {len(raw)}: {raw}"
+        assert [entry["rows"] for entry in parsed] == [[{"i": "first"}], [{"i": "third"}]], \
+            f"both intact lines have to survive, got {[e['rows'] for e in parsed]}"
+
+
+def test_an_intact_file_gains_no_blank_line():
+    """The repair must only fire on real damage, or every run adds an empty line."""
+    with TempDirs() as dirs:
+        miscellaneous.write_json_to_file([{"i": "first"}], "market.json")
+        miscellaneous.write_json_to_file([{"i": "second"}], "market.json")
+        miscellaneous.write_json_to_file([{"i": "third"}], "market.json")
+
+        with open(miscellaneous.history_file_path("market")) as f:
+            raw = f.read()
+
+        assert raw.count("\n\n") == 0, f"blank line inserted: {raw!r}"
+        assert len(raw.splitlines()) == 3, f"got {raw.splitlines()}"
+
+
 ### ===============================================================================
 
 if __name__ == "__main__":
@@ -373,6 +510,17 @@ if __name__ == "__main__":
     check("a failed write appends nothing", test_a_failed_write_appends_nothing)
     check("a broken store does not stop the write", test_a_broken_store_does_not_stop_the_write)
     check("the last good snapshot still happens", test_the_last_good_snapshot_still_happens)
+    check("any append failure leaves the write a success", test_any_failure_in_the_append_leaves_the_write_a_success)
+
+    print("\na hostile environment")
+    check("an unusable TZ does not fail the write", test_an_unusable_tz_does_not_fail_the_write)
+    check("an unusable TZ still records the line", test_an_unusable_tz_still_records_the_line)
+    check("a dataset name cannot leave the store", test_a_dataset_name_cannot_leave_the_store)
+    check("a real dataset name is accepted", test_a_real_dataset_name_is_accepted)
+
+    print("\nrecovering from a half written line")
+    check("a half written line does not swallow the next one", test_a_half_written_line_does_not_swallow_the_next_one)
+    check("an intact file gains no blank line", test_an_intact_file_gains_no_blank_line)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")
