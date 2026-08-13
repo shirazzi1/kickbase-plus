@@ -1,21 +1,33 @@
 import { useEffect, useState } from "react"
 import Tooltip from "@mui/material/Tooltip"
 import Typography from "@mui/material/Typography"
+import Chip from "@mui/material/Chip"
 import { Box, alpha, useTheme } from "@mui/material"
 import PagedDataGrid from "./PagedDataGrid"
 import {
     currencyFormatter,
     percentFormatter,
+    unsignedPercentFormatter,
     currencyOrDash,
     percentOrDash,
     deltaCellClassName,
     deltaColumnStyles,
     getStatusIcon
 } from "./SharedConstants"
-import { relativeChange, daysToBreakEven, formatDuration, elapsedSince } from "./marketFormulas"
+import {
+    relativeChange,
+    daysToBreakEven,
+    formatDuration,
+    elapsedSince,
+    ownManager,
+    minWinningBid,
+    forcedSaleRisk
+} from "./marketFormulas"
+import ManagerStacks, { ESTIMATE_NOTE } from "./ManagerStacks"
 
 // Import data
 import data from "../data/market.json"
+import balances from "../data/balances.json"
 
 const daysFormatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 })
 
@@ -57,8 +69,22 @@ const changeColumns = (field, label, width) => [
     }
 ]
 
+// The three solver columns all rest on the reconstructed budgets, so each header says so
+const SOLVER_NOTE = "Beruht auf den geschätzten Budgets aus balances.json, nicht auf Daten von Kickbase."
+
+// How the forced sale score is rendered. The wording is the claim, and the claim is only
+// as strong as the score: "droht" for the top band, plain pressure below it.
+const DISTRESS_LABELS = {
+    high: { label: "Zwangsverkauf droht", color: "error" },
+    watch: { label: "unter Druck", color: "warning" }
+}
+
 function MarketTable() {
     const theme = useTheme()
+
+    // Who "you" are, so the user is left out of their own rival set and a suggested bid is
+    // capped at their own budget. Null until a scrape has written the flag.
+    const me = ownManager(balances)
 
     // The listing age and the remaining time are the only columns that move on their own,
     // so the clock they are measured against is the component's state
@@ -139,6 +165,69 @@ function MarketTable() {
             valueFormatter: currencyOrDash,
             headerAlign: "center",
             cellClassName: "font-tabular-nums"
+        },
+        {
+            field: "minBid",
+            headerName: "Mindestgebot",
+            type: "number",
+            width: 165,
+            headerAlign: "center",
+            align: "right",
+            cellClassName: "font-tabular-nums",
+            description: "Das kleinste Gebot, das jeden Manager sicher überbietet, der sich den "
+                + "Preis leisten könnte - also einen Euro über dem höchsten fremden Maximalgebot, "
+                + "mindestens aber der Preis. Eine Obergrenze, keine Preisprognose: wenn alle "
+                + "mitbieten können, ist das das ganze Budget des reichsten Rivalen. "
+                + SOLVER_NOTE,
+            renderCell: (params) => {
+                const solved = params.row.solved
+
+                // On your own listing there is no bid to place, so there is no number to
+                // show either. The 'Verdeckte Bieter' column still names who could buy.
+                if (solved.isOwnListing)
+                    return (
+                        <Tooltip title="Deine eigene Listung - auf eigene Spieler kann nicht geboten werden." arrow>
+                            <span style={{ opacity: 0.6 }}>eigene Listung</span>
+                        </Tooltip>
+                    )
+
+                if (params.value === null || params.value === undefined)
+                    return "–"
+
+                // Who the bid has to beat, so the number reads as what it is instead of as
+                // a forecast. Kickbase never says who is bidding, so this is the set that
+                // could - not the set that does.
+                const others = solved.rivals.length - 1
+                const beats = solved.isPhantom
+                    ? "Kein anderer Manager kann den Preis zahlen, der Preis selbst genügt."
+                    : `Übertrifft ${solved.rivals[0].username} `
+                        + `(max. ${currencyFormatter.format(solved.rivals[0].maxBid)})`
+                        + (others > 0 ? ` und ${others} weitere.` : ".")
+
+                const capped = solved.exceedsBudget
+                    ? ` Nötig wären ${currencyFormatter.format(solved.required)} - `
+                        + `dein geschätztes Maximum sind ${currencyFormatter.format(solved.ownMaxBid)}.`
+                    : ""
+
+                // Deliberately not red. On the real market 79 of 86 rows sit above the own
+                // ceiling, because outbidding the richest manager is out of reach almost
+                // everywhere - and a column that is red nine rows in ten reads as "you can
+                // buy nothing", which is the opposite of true. The marker says what the
+                // number is instead: your own limit, not the bid that wins.
+                return (
+                    <Tooltip title={`${beats}${capped} ${ESTIMATE_NOTE}`} arrow>
+                        <span>
+                            {currencyFormatter.format(params.value)}
+                            {(solved.exceedsBudget || solved.isPhantom) && (
+                                <Typography component="span" variant="body2" sx={{ opacity: 0.6, marginLeft: "6px" }}>
+                                    {solved.exceedsBudget ? "dein Max." : "Phantom"}
+                                </Typography>
+                            )}
+                        </span>
+                    </Tooltip>
+                )
+            },
+            sortComparator: missingSortsLast
         },
         {
             field: "markup",
@@ -228,12 +317,91 @@ function MarketTable() {
                 value === null || value === undefined ? "–" : value
         },
         {
+            field: "hiddenBidders",
+            headerName: "Verdeckte Bieter",
+            type: "number",
+            width: 165,
+            headerAlign: "center",
+            align: "right",
+            cellClassName: "font-tabular-nums",
+            description: "Kickbase verrät nur, wie viele Gebote es gibt, nie von wem. Das hier "
+                + "sind die Manager, die den Preis überhaupt zahlen könnten - der Verkäufer und "
+                + "du selbst ausgenommen. " + SOLVER_NOTE,
+            renderCell: (params) => {
+                const solved = params.row.solved
+                const rivals = solved.rivals
+
+                if (rivals.length === 0) {
+                    // Three different reasons for a zero, and only one of them is a claim
+                    // about the league
+                    const why = solved.isOwnListing
+                        ? "Niemand in der Liga kann deinen Preis zahlen."
+                        : solved.isPhantom
+                            ? "Niemand außer dir kann den Preis zahlen."
+                            : "Keine Budgetdaten, also keine Aussage."
+
+                    return (
+                        <Tooltip title={`${why} ${ESTIMATE_NOTE}`} arrow>
+                            <span>0</span>
+                        </Tooltip>
+                    )
+                }
+
+                const who = rivals
+                    .map((rival) => `${rival.username} (max. ${currencyFormatter.format(rival.maxBid)})`)
+                    .join(", ")
+
+                // On your own listing the same set is the list of possible buyers
+                const lead = solved.isOwnListing ? "Mögliche Käufer: " : ""
+
+                return (
+                    <Tooltip title={`${lead}${who}. ${ESTIMATE_NOTE}`} arrow>
+                        <span>{rivals.length}</span>
+                    </Tooltip>
+                )
+            }
+        },
+        {
             field: "seller",
             headerName: "Verkäufer",
             flex: 1,
             minWidth: 110,
             headerAlign: "center",
             align: "center"
+        },
+        {
+            field: "distress",
+            headerName: "Zwangsverkauf droht",
+            type: "number",
+            width: 200,
+            headerAlign: "center",
+            align: "center",
+            description: "Wie sehr der Verkäufer verkaufen muss: wie viel von seinem erlaubten "
+                + "Dispo schon verbraucht ist, wie lange die Listung schon steht und wie wenige "
+                + "Gebote sie hat - multipliziert. Ein Minus allein ist noch kein Zwang; erst "
+                + "wenn kein Gebot mehr möglich ist, ist der Dispo ausgereizt. Eine Heuristik, "
+                + "keine Wahrscheinlichkeit. " + SOLVER_NOTE,
+            renderCell: (params) => {
+                const risk = params.row.distressDetail
+                const tier = DISTRESS_LABELS[risk.level]
+
+                if (!tier)
+                    return "–"
+
+                const title = `${risk.seller} steht ${currencyFormatter.format(risk.deficit)} im Minus `
+                    + `und hat davon ${unsignedPercentFormatter.format(risk.overdraftUsed)} seines erlaubten `
+                    + `Dispos verbraucht - es bleiben ${currencyFormatter.format(risk.headroom)}. `
+                    + `Die Listung läuft seit ${formatDuration(risk.ageHours * 60 * 60 * 1000)} `
+                    + `bei ${risk.offerCount} Gebot${risk.offerCount === 1 ? "" : "en"}. `
+                    + `Ein Tiefstgebot kann sich lohnen. ${ESTIMATE_NOTE}`
+
+                return (
+                    <Tooltip title={title} arrow>
+                        <Chip label={tier.label} color={tier.color} size="small" variant="outlined" />
+                    </Tooltip>
+                )
+            },
+            sortComparator: missingSortsLast
         },
         {
             field: "listedFor",
@@ -292,6 +460,10 @@ function MarketTable() {
         // A Date, so the column sorts chronologically instead of by string
         const expiration = row.expiration ? new Date(row.expiration) : null
 
+        // One call answers both solver columns, so the rival set is built once per listing
+        const solved = minWinningBid(row, balances, me?.userId)
+        const distressDetail = forcedSaleRisk(row, balances, now)
+
         return {
             // The player, not their position in the file. Keyed by index, every sale
             // shifted the rows below it onto a different player, which took the selection
@@ -327,6 +499,13 @@ function MarketTable() {
             offerCount: row.offerCount,
             seller: row.seller,
             isFreeAgent: row.isFreeAgent,
+            // The auction solver. The columns sort on the two numbers and read the detail
+            // off the object, so the set of affordable rivals is derived once per listing.
+            solved,
+            minBid: solved.bid,
+            hiddenBidders: solved.rivals.length,
+            distressDetail,
+            distress: distressDetail.score,
             expiration,
             listedSince: row.listedSince,
             // How long the listing has been up, and how long it still has to run. Both are
@@ -338,6 +517,8 @@ function MarketTable() {
 
     // Populate the table
     return (
+        <>
+        <ManagerStacks balances={balances} />
         <Box sx={{
             ...deltaColumnStyles,
             // Paying over the market value is the expensive direction
@@ -358,6 +539,7 @@ function MarketTable() {
                 initialState={{ sorting: { sortModel: [{ field: "expiration", sort: "asc" }] } }}
             />
         </Box>
+        </>
     )
 }
 
