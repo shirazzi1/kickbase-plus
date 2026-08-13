@@ -213,6 +213,23 @@ def player_marketvalue(token: str, player_id: str, days: int = None):
     return history
 
 
+def cached_market_value(player_id: str):
+    """### The market value history of a player, but only if this run already fetched it.
+
+    A read-only look into the cache player_marketvalue() fills. Derivation steps that want
+    the curve of many players - backend/profiles.py - can then use what the run happened to
+    fetch anyway and report honestly on what is missing, instead of turning into a few
+    hundred extra requests.
+
+    Args:
+        player_id (str): The player to look up.
+
+    Returns:
+        list: The history, or None if this run has not fetched it.
+    """
+    return _player_marketvalue_cache.get(str(player_id))
+
+
 def _fetch_marketvalue(token: str, player_id: str, days: int):
     """### Ask for one player's market value history over a given window.
 

@@ -8,7 +8,7 @@ from sys import stdout
 from logging.config import dictConfig
 from datetime import datetime, timedelta, timezone
 
-from backend import exceptions, miscellaneous, runs
+from backend import exceptions, miscellaneous, profiles, runs
 from backend.kickbase.v4 import competitions, user, leagues
 from backend.paths import LOG_DIR, DATA_DIR, TIMESTAMP_DIR
 
@@ -125,6 +125,10 @@ def build_stages(user_token: str, selected_league: object, own_user_id: str) -> 
         ("turnovers", lambda: turnovers(user_token, selected_league)),
         ("team_values", lambda: team_value_per_match_day(user_token, selected_league)),
         ("league_user_stats", lambda: league_user_stats_tables(user_token, selected_league)),
+        ### Last, and deliberately so: it derives, it does not fetch. It reads the files
+        ### the stages above wrote and the market value curves they left in the run cache,
+        ### which is why it costs no API requests at all.
+        ("manager_profiles", profiles.write_manager_profiles),
         # ("live_points", lambda: live_points(user_token, selected_league)), # needs to be run first to initialize the live_points.json file
     ]
 
