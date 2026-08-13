@@ -209,14 +209,23 @@ fetches for the deltas. No additional API calls.
 ### Backend: the two new row fields
 
 ```json
-{ "playerId": "49", "isOwnListing": false, "avgDailyGrowth": 14705, ... }
+{ "playerId": "49", "avgDailyGrowth": 14705, ... }
 ```
 
 - **`playerId`** — `player.id`. The row is not addressable today; without it no request
   can name a player.
-- **`isOwnListing`** — `player.userId == own_user_id`. You cannot bid on a player you
-  listed yourself.
 - **`avgDailyGrowth`** — as above, `null` when the history is too short.
+
+**A third field, `isOwnListing`, was planned here and is not shipped.** You cannot bid on
+a player you listed yourself, so the cell needs to know — but by the time this branch
+merged, `main` had grown an auction solver that answers the same question from the
+`sellerId` it already ships. Two independent computations of one concept agree until they
+drift, and then one would lock the cell while the other offered a minimum bid. So the
+derivation lives in exactly one place, in the solver, and the cell reads its result.
+
+The server-side refusal in `place_bid` is deliberately *not* that same computation: it
+compares `listing.userId` against the logged-in id itself, because a check that depends on
+what the browser worked out is not a check.
 
 ### Backend: the config file
 
