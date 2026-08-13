@@ -56,6 +56,12 @@ The bid field also needs `BID_TOKEN` set. Both write endpoints require it on an
 `BID_TOKEN` environment variable, via `frontend/src/setupProxy.js`) and it is never sent
 to the browser. Because of that, **port 3000 must not be exposed publicly** — anything
 that can reach the dev server can bid through its proxy exactly as the frontend does.
+`BID_TOKEN` is required for the whole container to start, not only for this field — see
+the Docker section below for why.
+
+The bid field only works against the frontend dev server (`npm start`), which is what
+the Docker container runs. A static `npm run build` bundle ships neither the proxy nor
+the token, so the bid field cannot function there; that build target is left as-is.
 
 ## Docker
 If you want to run this in a Docker container, you'll first need to set some mandatory environment variables:  
@@ -70,10 +76,15 @@ If you want to run this in a Docker container, you'll first need to set some man
 | `START_DATE` | **Yes** | The instant the season started or your league was reset, as an ISO 8601 timestamp with an explicit UTC offset, e.g. `2026-08-01T18:00:00Z`. Events in the Kickbase activity feed from before this instant are excluded from the transfer, revenue and balance calculations. |
 | `START_MONEY` | No | The amount of money you started with. If not set, defaults to 50.000.000€ |
 | `TZ` | No | The timezone to use. Defaults to `Europe/Berlin` |
+| `BID_TOKEN` | **Yes** | A shared secret required by the two Flask endpoints that place and withdraw a market bid (see [Transfermarkt](#transfermarkt)). **The container will not start without it, even if you never use the bid field.** Pick any long random string; only the frontend dev server ever sends it, and it never reaches the browser. |
 
 > [!IMPORTANT]
 > The format of `START_DATE` changed: the old `dd.mm.yyyy` format is no longer accepted and now causes a hard error on startup.
 > If you are upgrading, migrate your value to an ISO 8601 timestamp with an explicit UTC offset (e.g. `2026-08-01T18:00:00Z`) and use the actual time of day the season started or your league was reset - the container will refuse to start otherwise.
+
+> [!IMPORTANT]
+> `BID_TOKEN` is a new **required** variable. If you are upgrading an existing container, add it before you restart - `entrypoint.py` exits immediately if it is missing, so the whole container (scraper included) will refuse to start, not just the bid field.
+> That is a deliberate trade-off: one column's secret becoming a requirement for the entire container is a feature-level need escalated to an app-level one, made on purpose to keep the check simple and fail loudly rather than have the bid field fail confusingly later. See [Transfermarkt](#transfermarkt) for what the token protects.
 
 > [!IMPORTANT]
 > The live points feature is currently on-hold and not present as of v2.4.0!
@@ -89,9 +100,11 @@ docker run -d \
     -e KB_PASSWORD=<kickbase_password> \
     -e DISCORD_WEBHOOK=<discord_webhook> \
     -e START_DATE=<start_timestamp> \
+    -e BID_TOKEN=<bid_token> \
     ghcr.io/casudo/kickbase-insights:latest
 ```  
 `<start_timestamp>` is an ISO 8601 timestamp in UTC, e.g. `2026-08-01T18:00:00Z`.  
+`<bid_token>` is any long random string of your choosing; the container exits on startup without it.  
 
 ### Docker Compose
 ```yaml
@@ -110,6 +123,7 @@ services:
       - KB_PASSWORD=<kickbase_password>
       - DISCORD_WEBHOOK=<discord_webhook>
       - START_DATE=<start_timestamp> # ISO 8601 in UTC, e.g. 2026-08-01T18:00:00Z
+      - BID_TOKEN=<bid_token> # any long random string; container exits on startup without it
 ```  
 
 ---

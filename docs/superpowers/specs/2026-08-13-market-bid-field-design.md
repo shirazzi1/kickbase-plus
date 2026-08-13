@@ -167,6 +167,17 @@ The probe script was a throwaway in the scratchpad and is not committed.
    which forwards `/api/*` to Flask on 5000. Works locally and in the container — the
    container runs the dev server anyway — and needs no host-guessing env variable. It is
    also what the commented-out `fetch("/api/livepoints")` in `App.js:78` intended.
+9. **An unconfirmable write is its own outcome, neither success nor failure.** Kickbase
+   can accept a POST or DELETE and then have the read-back that verifies it fail on its
+   own terms — a second request that itself times out, or a market read that has not
+   yet caught up with the write that just landed. At that point the bid's real state is
+   unknown from here, and it stays unknown regardless of which way the response guesses.
+   Reporting success risks telling the user a bid stands when it does not; reporting
+   failure risks sending them to retry an action that already went through, doubling it.
+   Both guesses are actively harmful, not merely imprecise, so this case gets its own
+   response — `502`, a message naming neither outcome, and a pointer at the Kickbase app
+   rather than at a retry — and it never patches `market.json`, since a value that could
+   not be confirmed is worse to write than a stale one.
 
 ## Design
 
@@ -354,8 +365,53 @@ shows immediately without waiting for the rebuild the `market.json` patch trigge
 
 ### Frontend: reaching Flask
 
-`"proxy": "http://localhost:5000"` in `frontend/package.json`; requests go to relative
-`/api/...` paths. No new environment variable, no CORS.
+`frontend/src/setupProxy.js`, not the `"proxy"` string it replaced in
+`frontend/package.json`. CRA loads this file itself when it exists; the browser still
+talks only to the dev server on 3000, and requests are still relative `/api/...` paths -
+that part of the original design held. What changed is *why* a file replaced the
+string: the string has no hook for adding a header, and the write endpoints need one.
+
+Both write endpoints require an `X-Bid-Token` header (`app.py`'s `_check_bid_token()`).
+`setupProxy.js` reads a `BID_TOKEN` environment variable of its own - a new one, read
+only by the Node process running the dev server - and attaches it to every proxied
+request before it reaches Flask on 5000. The browser sends no token at all and the React
+bundle never contains one: a value baked into the bundle (a `REACT_APP_*` variable,
+say) ships to every browser that loads the page and can be read back out of it, which
+would make it a secret in name only. Reading `process.env.BID_TOKEN` in
+`setupProxy.js` keeps it inside a process the browser never touches.
+
+CORS is removed, not configured. `CORS(app)` reflected any `Origin` it was sent, so any
+page open in the user's browser could POST/DELETE a real bid cross-origin. Since the
+proxy makes every legitimate request same-origin, Flask never needs to answer a
+cross-origin one - there is no CORS policy to get right here, only the choice to have
+none.
+
+### Security
+
+There was no security subsection in the first pass of this document, which is how a
+blanket `CORS(app)` — reflecting any `Origin`, letting any page the user's browser had
+open drive real bids cross-origin — survived design review. Writing this down is the
+fix for that, not just the token.
+
+`BID_TOKEN` (`app.py`'s `_check_bid_token()`, attached by `frontend/src/setupProxy.js`)
+defends against two things:
+
+- **A page the user's browser has open driving the bid endpoints cross-origin.** This is
+  what the removed `CORS(app)` used to allow. The proxy already makes real requests
+  same-origin, so this is largely belt-and-suspenders against that mistake being made
+  again — but it means a reintroduced `CORS(app)` would still hit a 401 rather than a
+  live bid, which is the point of layering the two.
+- **Direct access to the Flask port.** Anything that reaches port 5000 without going
+  through the proxy — and so without the token attached — gets a 401 instead of a
+  working endpoint.
+
+It does **not** defend against anyone who can reach the frontend's own port (3000).
+`setupProxy.js` is what attaches the token; it does not check who is asking it to. So
+the Transfermarkt section's "port 3000 must not be exposed publicly" is the actual
+boundary — anything that can reach the dev server can place and withdraw bids through
+the proxy exactly as the frontend does, token included, because the proxy adds the
+token on their behalf too. The token authenticates the *proxy* to Flask; it is not a
+login in front of the frontend, and was never meant to be one.
 
 ## Testing
 
