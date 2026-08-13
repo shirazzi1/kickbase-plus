@@ -28,6 +28,14 @@ MAX_PLAYER_WORKERS = 8
 ### front of the field, and no other call in this module has a timeout at all.
 OFFER_TIMEOUT = 15
 
+### Seconds to wait for a market read. get_market() is the confirming read-back app.py
+### calls after place_offer()/remove_offer() have already moved money - a hang there
+### would block the response indefinitely in exactly the window app.py's 502 "could not
+### confirm" outcome exists for. main.py's plain market scrape shares the same call and
+### this bound is safe for it too. The other read functions in this module are
+### deliberately left untimed; giving them one as well is a separate concern.
+MARKET_TIMEOUT = 15
+
 _player_statistics_cache = {}
 _player_marketvalue_cache = {}
 _transfers_cache = {}
@@ -80,6 +88,14 @@ def get_market(token: str, league_id: str):
     """
     ### Get the current players on the market in the league
 
+    Given a timeout (MARKET_TIMEOUT), unlike the other read functions in this module.
+    app.py calls this twice per write - once to check the market before place_offer()/
+    remove_offer(), once as the read-back that confirms the write afterwards - and that
+    second call runs after Kickbase has already accepted the write. A hung socket there
+    would block the response indefinitely in exactly the window app.py's 502 "could not
+    confirm" outcome exists for. main.py's plain scrape goes through the same call and
+    tolerates the bound fine.
+
     Expected response:
     ```json
     {
@@ -102,7 +118,7 @@ def get_market(token: str, league_id: str):
 
     ### Send GET request to get all free players in the given league
     try:
-        json_response = requests.get(url, headers=headers).json()
+        json_response = requests.get(url, headers=headers, timeout=MARKET_TIMEOUT).json()
         ### Create a new object for every entry in the json_response["it"] list. Kept
         ### inside the try: a response with no "it" key (an expired token, seen live) is
         ### as much a failed read as the request itself, and both callers of this
