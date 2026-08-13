@@ -359,6 +359,164 @@ def test_the_discord_webhook_sends_no_kickbase_headers():
 
 
 ### ===============================================================================
+### The webhook URL is a credential
+###
+### Whoever has the full URL can post into the channel. These exceptions reach
+### "docker logs" through main.py's print(e) and the rotating log files through
+### _announce_login_failure(), which is exactly the material people paste into an issue.
+### ===============================================================================
+
+
+### Shaped like a real one: the path after the id is the token
+WEBHOOK = "https://discord.com/api/webhooks/1234567890/aBcDeF-secret-token-xyz"
+WEBHOOK_SECRET = "aBcDeF-secret-token-xyz"
+
+
+def test_a_webhook_error_status_does_not_leak_the_url():
+    fake = FakeSession(FakeResponse({}, status_code=401))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.AuthExpiredException, lambda: http.post_no_json(WEBHOOK, {"a": 1})))
+
+    assert WEBHOOK_SECRET not in str(error), f"the webhook token leaked: {error}"
+    assert "discord.com" in str(error), f"the host is the useful part, got {error}"
+
+
+def test_an_unreachable_webhook_does_not_leak_the_url():
+    """A ConnectionError carries the request path in its own message, so it is not passed on."""
+    fake = FakeSession(raises=requests.exceptions.ConnectionError(
+        f"HTTPSConnectionPool(host='discord.com', port=443): Max retries exceeded with url: "
+        f"/api/webhooks/1234567890/{WEBHOOK_SECRET}"))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.ApiUnreachableException, lambda: http.post_no_json(WEBHOOK, {"a": 1})))
+
+    assert WEBHOOK_SECRET not in str(error), f"the webhook token leaked: {error}"
+    assert "ConnectionError" in str(error), f"the cause should still be named, got {error}"
+
+
+def test_a_webhook_failure_leaks_nothing_through_the_chained_cause():
+    """A chained cause is printed with the traceback, so it must not carry the URL either."""
+    fake = FakeSession(raises=requests.exceptions.ConnectionError(
+        f"Max retries exceeded with url: /api/webhooks/1/{WEBHOOK_SECRET}"))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.ApiUnreachableException, lambda: http.post_no_json(WEBHOOK, {"a": 1})))
+
+    assert error.__cause__ is None, f"the requests error is still chained: {error.__cause__}"
+    assert WEBHOOK_SECRET not in str(error.url), f"the stored url leaked: {error.url}"
+
+
+def test_the_notification_wrapper_does_not_leak_it_either():
+    """discord_notification() builds its message out of this exception."""
+    from backend import miscellaneous
+
+    fake = FakeSession(FakeResponse({}, status_code=404))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.NotificatonException,
+        lambda: miscellaneous.discord_notification("t", "m", 0, WEBHOOK)))
+
+    assert WEBHOOK_SECRET not in str(error), f"the webhook token leaked: {error}"
+
+
+def test_host_only_keeps_nothing_but_scheme_and_host():
+    assert http.host_only(WEBHOOK) == "https://discord.com", f"got {http.host_only(WEBHOOK)}"
+    assert http.host_only("not a url") == "<url>", f"got {http.host_only('not a url')}"
+
+
+def test_kickbase_urls_are_not_redacted():
+    """They carry league and player ids, which are the useful part and no secret.
+
+    The Kickbase token travels in a Cookie header, never in the URL.
+    """
+    url = "https://api.kickbase.com/v4/leagues/11412166/managers/3854976/dashboard"
+    fake = FakeSession(FakeResponse({}, status_code=404))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.ApiRequestException, lambda: http.get_json(url, "token")))
+
+    assert "11412166" in str(error), f"the league id should survive, got {error}"
+
+
+### ===============================================================================
+### Messages describe the caller they belong to
+### ===============================================================================
+
+
+def test_a_webhook_401_does_not_blame_a_kickbase_token():
+    """A deleted or rotated webhook answers 401, and sending the reader after a Kickbase
+    token is the same wrong-subsystem habit this module exists to end."""
+    fake = FakeSession(FakeResponse({}, status_code=401))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.AuthExpiredException, lambda: http.post_no_json(WEBHOOK, {"a": 1})))
+
+    assert "Kickbase" not in str(error), f"got {error}"
+    assert "webhook" in str(error).lower(), f"got {error}"
+
+
+def test_a_kickbase_401_still_names_the_token():
+    fake = FakeSession(FakeResponse({}, status_code=401))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.AuthExpiredException, lambda: http.get_json(URL, "token")))
+
+    assert "Kickbase token" in str(error), f"got {error}"
+
+
+def test_a_failed_post_does_not_claim_retries_that_never_happened():
+    """The retry policy leaves POST out, so nothing was repeated."""
+    fake = FakeSession(FakeResponse({}, status_code=500))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.ApiUnavailableException, lambda: http.post_json(URL, {"em": "a"})))
+
+    assert "retries" not in str(error), f"a POST is never retried, got {error}"
+
+
+def test_a_rate_limited_post_does_not_claim_retries_either():
+    fake = FakeSession(FakeResponse({}, status_code=429, headers={"Retry-After": "5"}))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.RateLimitedException, lambda: http.post_json(URL, {"em": "a"})))
+
+    assert "retries" not in str(error), f"a POST is never retried, got {error}"
+    assert "5" in str(error), f"Retry-After is still worth saying, got {error}"
+
+
+def test_a_failed_get_does_say_it_was_retried():
+    fake = FakeSession(FakeResponse({}, status_code=500))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.ApiUnavailableException, lambda: http.get_json(URL, "token")))
+
+    assert f"{http.RETRY_TOTAL} retries" in str(error), f"got {error}"
+
+
+def test_a_probe_get_does_not_claim_retries():
+    """The team probe runs on the session without a retry policy."""
+    fake = FakeSession(FakeResponse({}, status_code=500))
+
+    error = with_session(fake, lambda: expect_raises(
+        exceptions.ApiUnavailableException,
+        lambda: http.get_json(URL, "token", retry=False)))
+
+    assert "retries" not in str(error), f"the probe session does not retry, got {error}"
+
+
+def test_the_retry_claim_follows_the_policy_it_describes():
+    """One source of truth, so the wording cannot drift away from allowed_methods."""
+    retries = http.session().get_adapter("https://api.kickbase.com").max_retries
+
+    assert set(retries.allowed_methods) == set(http.RETRY_METHODS), \
+        f"{retries.allowed_methods} vs {http.RETRY_METHODS}"
+    assert http.was_retried("GET", retry=True) is True
+    assert http.was_retried("POST", retry=True) is False
+    assert http.was_retried("GET", retry=False) is False
+
+
+### ===============================================================================
 ### No module talks to requests directly any more
 ### ===============================================================================
 
@@ -469,6 +627,23 @@ if __name__ == "__main__":
     print("\nthe Discord webhook")
     check("has a timeout too", test_the_discord_webhook_has_a_timeout_too)
     check("sends no Kickbase headers", test_the_discord_webhook_sends_no_kickbase_headers)
+
+    print("\nthe webhook URL is a credential")
+    check("an error status does not leak the url", test_a_webhook_error_status_does_not_leak_the_url)
+    check("an unreachable webhook does not leak the url", test_an_unreachable_webhook_does_not_leak_the_url)
+    check("nothing leaks through the chained cause", test_a_webhook_failure_leaks_nothing_through_the_chained_cause)
+    check("the notification wrapper does not leak it either", test_the_notification_wrapper_does_not_leak_it_either)
+    check("host_only keeps nothing but scheme and host", test_host_only_keeps_nothing_but_scheme_and_host)
+    check("Kickbase urls are not redacted", test_kickbase_urls_are_not_redacted)
+
+    print("\nmessages describe the caller they belong to")
+    check("a webhook 401 does not blame a Kickbase token", test_a_webhook_401_does_not_blame_a_kickbase_token)
+    check("a Kickbase 401 still names the token", test_a_kickbase_401_still_names_the_token)
+    check("a failed POST claims no retries", test_a_failed_post_does_not_claim_retries_that_never_happened)
+    check("a rate limited POST claims no retries either", test_a_rate_limited_post_does_not_claim_retries_either)
+    check("a failed GET does say it was retried", test_a_failed_get_does_say_it_was_retried)
+    check("a probe GET claims no retries", test_a_probe_get_does_not_claim_retries)
+    check("the retry claim follows the policy", test_the_retry_claim_follows_the_policy_it_describes)
 
     print("\nno module talks to requests directly")
     check("no Kickbase module calls requests directly", test_no_kickbase_module_calls_requests_directly)

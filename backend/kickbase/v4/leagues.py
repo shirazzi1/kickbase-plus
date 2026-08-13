@@ -194,9 +194,13 @@ def player_marketvalue(token: str, player_id: str, days: int = None):
     ### /marketValue/365 is the only window this project has ever asked for, so a shorter
     ### one going unanswered is a real possibility. Falling back keeps the run alive, and
     ### remembering the fallback keeps it to one wasted request instead of one per player.
+    ### If Kickbase is simply down, this costs exactly one extra request before the wider
+    ### window fails too and the run stops - see _fetch_marketvalue() for why the 5xx is
+    ### not assumed to be an outage on the first attempt.
     if history is None and days != miscellaneous.MAX_MARKET_VALUE_DAYS:
-        logging.warning(f"Kickbase did not serve a {days} day market value window. "
-                        f"Falling back to {miscellaneous.MAX_MARKET_VALUE_DAYS} days for the rest of this run.")
+        logging.warning(f"Kickbase did not answer a {days} day market value window (the reason "
+                        f"is in the DEBUG log). Falling back to "
+                        f"{miscellaneous.MAX_MARKET_VALUE_DAYS} days for the rest of this run.")
         _market_value_days = miscellaneous.MAX_MARKET_VALUE_DAYS
         history = _fetch_marketvalue(token, player_id, _market_value_days)
 
@@ -222,15 +226,28 @@ def _fetch_marketvalue(token: str, player_id: str, days: int):
     """
     url = f"https://api.kickbase.com/v4/competitions/1/players/{player_id}/marketValue/{days}"
 
-    ### Send GET request to get the market value history of the given player.
-    ### A window the API does not serve is a rejected request, and the only HTTP error
-    ### this project reads as an answer rather than as a failure. Everything else - an
-    ### expired token, a rate limit, a hung socket - travels on to the caller.
+    ### A window the API does not serve reads as an answer here rather than as a failure,
+    ### so player_marketvalue() can widen it. Which statuses mean that is not obvious:
+    ### the only evidence in this repository of how Kickbase answers for a resource it
+    ### does not have is the note in competitions.get_team_overview(), and it says 500.
+    ### So a server error counts as "not served" too - but only while there is a wider
+    ### window left to try. Once the request is already at MAX_MARKET_VALUE_DAYS, the
+    ### same 5xx is a real outage and travels on, so a broken Kickbase still fails loudly
+    ### instead of silently producing histories nobody can read.
+    ###
+    ### Everything else - an expired token, a rate limit, a hung socket - always travels
+    ### on to the caller.
+    unserved = (exceptions.ApiRequestException, exceptions.ApiResponseException)
+
+    if days != miscellaneous.MAX_MARKET_VALUE_DAYS:
+        unserved += (exceptions.ApiUnavailableException,)
+
+    ### Send GET request to get the market value history of the given player
     try:
         json_response = http.get_json(url, token)
-    except exceptions.ApiRequestException:
-        return None
-    except exceptions.ApiResponseException:
+    except unserved as e:
+        logging.debug(f"Kickbase did not answer a {days} day market value window for "
+                      f"player {player_id}: {e}")
         return None
 
     return json_response.get("it")

@@ -30,6 +30,7 @@ import logging
 import requests
 
 from requests.adapters import HTTPAdapter
+from urllib.parse import urlsplit
 from urllib3.util.retry import Retry
 
 from backend import exceptions
@@ -48,13 +49,45 @@ RETRY_TOTAL = 3
 RETRY_BACKOFF_FACTOR = 1
 RETRY_STATUS_FORCELIST = (429, 500, 502, 503, 504)
 
+### Only methods that can be repeated without a second side effect. POST - which here
+### means the login and the Discord webhook - is not among them, and the error messages
+### read this same set so they cannot claim retries that never happened.
+RETRY_METHODS = frozenset(["GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE"])
+
 ### How many connections to keep alive. A run walks every player in the competition, so
 ### the pool wants to be big enough that the concurrent prefetches do not evict each
 ### other's connections and hand back the TLS handshake savings.
 POOL_MAXSIZE = 32
 
+### What every Kickbase error message says about a rejected token. Passed in rather than
+### hardcoded in _raise_for_status(), because that function also serves the Discord
+### webhook, where a 401 has nothing to do with any Kickbase token.
+KICKBASE_AUTH_MESSAGE = "The Kickbase token was rejected."
+WEBHOOK_AUTH_MESSAGE = "The webhook rejected it - it may have been deleted or its token rotated."
+
 _session = None
 _probe_session = None
+
+
+def host_only(url: str) -> str:
+    """### Reduce a URL to scheme and host, dropping path and query.
+
+    For the Discord webhook the path *is* the secret: whoever has the full URL can post
+    into the channel. It must not reach a log file or a pasted stack trace, and both
+    happen - main.py prints the exception, and _announce_login_failure() logs it.
+
+    Args:
+        url (str): The URL to reduce.
+
+    Returns:
+        str: Scheme and host, e.g. "https://discord.com".
+    """
+    parts = urlsplit(url)
+
+    if not parts.netloc:
+        return "<url>"
+
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def _build_session(retry: bool) -> requests.Session:
@@ -79,9 +112,7 @@ def _build_session(retry: bool) -> requests.Session:
             status_forcelist=RETRY_STATUS_FORCELIST,
             respect_retry_after_header=True,
             raise_on_status=False,
-            ### The default set, spelled out: only methods that can be repeated without
-            ### a second side effect. POST - which here means the login - is not retried.
-            allowed_methods=frozenset(["GET", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE"]),
+            allowed_methods=RETRY_METHODS,
         )
     else:
         retries = Retry(total=0, raise_on_status=False)
@@ -238,7 +269,7 @@ def _request(method: str, url: str, payload: dict = None, token: str = None,
         raise exceptions.ApiUnreachableException(
             f"{method} {url} could not be reached: {e}", url=url) from e
 
-    _raise_for_status(method, url, response)
+    _raise_for_status(method, url, response, KICKBASE_AUTH_MESSAGE, was_retried(method, retry))
 
     try:
         return response.json()
@@ -250,13 +281,35 @@ def _request(method: str, url: str, payload: dict = None, token: str = None,
             url=url, status_code=response.status_code) from e
 
 
-def _raise_for_status(method: str, url: str, response) -> None:
+def was_retried(method: str, retry: bool) -> bool:
+    """### Whether a failed request of this kind was actually repeated.
+
+    A message claiming "still failing after 3 retries" about a POST is wrong twice over:
+    the retry policy leaves POST out, so there was not one repeat. Naming the wrong cause
+    is the habit this whole module exists to break, and it does not get an exception for
+    its own error messages.
+
+    Args:
+        method (str): The HTTP method used.
+        retry (bool): Whether the retrying session was used at all.
+
+    Returns:
+        bool: True if the retry policy applied to this request.
+    """
+    return retry and method in RETRY_METHODS
+
+
+def _raise_for_status(method: str, url: str, response, auth_message: str, retried: bool) -> None:
     """### Turn an error status into the exception that describes it.
 
     Args:
         method (str): "GET" or "POST", for the message.
-        url (str): The URL that was called.
+        url (str): The URL that was called. Already reduced to its host where the path
+            carries a secret - see host_only().
         response: The response to judge.
+        auth_message (str): What a 401 or 403 means for this caller. Kickbase and the
+            Discord webhook have nothing in common here beyond the status code.
+        retried (bool): Whether the request was actually repeated, from was_retried().
     """
     status = response.status_code
 
@@ -265,30 +318,39 @@ def _raise_for_status(method: str, url: str, response) -> None:
 
     message = f"{method} {url} answered {status}."
 
+    ### Only claim the retries that really happened
+    after_retries = f" Still failing after {RETRY_TOTAL} retries." if retried else ""
+
     if status in (401, 403):
         raise exceptions.AuthExpiredException(
-            f"{message} The Kickbase token was rejected.", url=url, status_code=status)
+            f"{message} {auth_message}", url=url, status_code=status)
 
     if status == 429:
         retry_after = response.headers.get("Retry-After")
         waited = f" Retry-After was {retry_after}." if retry_after else ""
+        limited = f" Still rate limited after {RETRY_TOTAL} retries." if retried else ""
         raise exceptions.RateLimitedException(
-            f"{message} Still rate limited after {RETRY_TOTAL} retries.{waited}",
-            url=url, status_code=status)
+            f"{message}{limited}{waited}", url=url, status_code=status)
 
     if status < 500:
         raise exceptions.ApiRequestException(message, url=url, status_code=status)
 
     raise exceptions.ApiUnavailableException(
-        f"{message} Still failing after {RETRY_TOTAL} retries.", url=url, status_code=status)
+        f"{message}{after_retries}", url=url, status_code=status)
 
 
 def post_no_json(url: str, payload: dict, timeout=DEFAULT_TIMEOUT) -> None:
     """### POST a JSON payload where the answer does not matter.
 
     The Discord webhook. It is not a Kickbase call, so it gets none of the Kickbase
-    headers, but it is an outbound request over the network and therefore needs the same
-    timeout: without one a stalled Discord parks the whole run.
+    headers, none of the Kickbase wording, and its URL never appears in full: the path of
+    a webhook URL is the credential, and these exceptions end up in the container log and
+    in the rotating log files.
+
+    That is also why the underlying requests error is neither passed through nor chained
+    ("from None"): a ConnectionError carries the request path in its own message, and a
+    chained cause is printed with the traceback. The exception class name says what went
+    wrong; the urllib3 frames below it say nothing the host and the class do not.
 
     Args:
         url (str): The webhook URL.
@@ -299,14 +361,21 @@ def post_no_json(url: str, payload: dict, timeout=DEFAULT_TIMEOUT) -> None:
         exceptions.ApiUnreachableException: No answer at all.
         exceptions.HttpException: An error status.
     """
+    safe_url = host_only(url)
+
     try:
         response = session().post(url, json=payload,
                                   headers={"Content-Type": "application/json"},
                                   timeout=timeout)
+    except requests.exceptions.Timeout:
+        raise exceptions.ApiUnreachableException(
+            f"POST {safe_url} timed out after {timeout}.", url=safe_url) from None
     except requests.exceptions.RequestException as e:
         raise exceptions.ApiUnreachableException(
-            f"POST {url} could not be reached: {e}", url=url) from e
+            f"POST {safe_url} could not be reached ({type(e).__name__}).",
+            url=safe_url) from None
 
-    _raise_for_status("POST", url, response)
+    _raise_for_status("POST", safe_url, response, WEBHOOK_AUTH_MESSAGE,
+                      was_retried("POST", retry=True))
 
-    logging.debug(f"POST {url} answered {response.status_code}.")
+    logging.debug(f"POST {safe_url} answered {response.status_code}.")
