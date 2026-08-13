@@ -110,10 +110,15 @@ MATCHDAY_POINT_TIERS = [(1_000, 701), (1_500, 702), (2_000, 703)]
 ### balances() and league_user_stats_tables() ask for every user.
 _profilepic_cache = {}
 
+### Display names out of the activity feed that no manager in the league carries. Kept so
+### the warning is logged once per name instead of once per booking.
+_unresolved_user_names = set()
+
 
 def clear_caches() -> None:
     """### Empty the per-run caches held in this module."""
     _profilepic_cache.clear()
+    _unresolved_user_names.clear()
 
 
 POSITIONS = {1: "TW", 2: "ABW", 3: "MF", 4: "ANG"}
@@ -193,16 +198,24 @@ def calculate_revenue_data_daily(turnovers: dict) -> None:
     with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
 
-    ### Create an empty dict with all user names as keys
-    user_transfer_revenue = {user_name: [] for user_name in league_users.values()}
+    ### Create an empty dict with all user IDs as keys. The chart legend needs the names,
+    ### but the grouping goes by ID: a manager who renamed themselves mid-season would
+    ### otherwise end up as two series, one of them empty.
+    user_transfer_revenue = {user_id: [] for user_id in league_users}
+
+    name_to_id = build_user_name_index(league_users)
 
     ### This loop iterates over each buy-sell pair in the turnovers list. It calculates the revenue by subtracting the buy value from the sell value.
     ### The revenue and the date of the sell transfer are then appended to the corresponding user's list in user_transfer_revenue.
-    
+
     for buy, sell in turnovers:
         revenue = sell["price"] - buy["price"]
-        if buy["user"] in league_users.values():
-            user_transfer_revenue[buy["user"]].append((revenue, sell["date"]))
+        ### turnovers.json written before this change carries no "userId" yet, so the
+        ### display name is still good for one fallback
+        user_id = buy.get("userId") or resolve_user_id(buy["user"], name_to_id)
+
+        if user_id in user_transfer_revenue:
+            user_transfer_revenue[user_id].append((revenue, sell["date"]))
 
     ### Add start and end points for the graph.
     ### Both are timezone aware UTC, so they line up with the feed timestamps that make
@@ -226,11 +239,15 @@ def calculate_revenue_data_daily(turnovers: dict) -> None:
         dataframes[user] = df
 
     ### Here, the data is formatted into a dictionary called data.
-    ### Each user's name is a key, and the corresponding value is a list of tuples containing revenue and date information
+    ### Each user's name is a key, and the corresponding value is a list of tuples containing revenue and date information.
+    ### The chart uses the key as the series label, so the ID is translated back here - at
+    ### the last possible moment, after all the grouping has been done on the ID.
     data = {user_name: [] for user_name in league_users.values()}
-    for user, df in dataframes.items():
+    for user_id, df in dataframes.items():
+        user_name = league_users[user_id]
+
         for entry in df.to_numpy().tolist():
-            data[user].append((entry[0], entry[1]))
+            data[user_name].append((entry[0], entry[1]))
 
     logging.info("Calculated daily revenue data.")
 
@@ -306,6 +323,46 @@ def market_value_deltas(market_value_history: list) -> dict:
         "sevenDaysAvg": delta(-1, -8),
         "thirtyDaysAvg": delta(-1, -31),
     }
+
+
+### How far back a market value history has to reach.
+###
+### Two callers decide this. market_value_deltas() reads the last 31 entries, and
+### taken_free_players() and turnovers() scan back to START_DATE for the value a player
+### assigned at the season start counts as their buy price. So the answer is "31 days, or
+### back to the season start, whichever is further" - which early in a season is a small
+### fraction of the year that was downloaded for every player before.
+###
+### The upper bound is the window the API is known to serve, and the one every request used
+### to ask for.
+MIN_MARKET_VALUE_DAYS = 31
+MAX_MARKET_VALUE_DAYS = 365
+
+
+def market_value_days(now: datetime = None) -> int:
+    """### How many days of market value history a run actually needs.
+
+    Falls back to the full year if START_DATE cannot be read. Asking for too much only
+    costs bandwidth; asking for too little would invent buy prices.
+
+    Args:
+        now (datetime): The instant to measure the season length against, normally now.
+
+    Returns:
+        int: A window between MIN_MARKET_VALUE_DAYS and MAX_MARKET_VALUE_DAYS.
+    """
+    try:
+        start_datetime = get_start_datetime()
+    except exceptions.KickbaseException:
+        return MAX_MARKET_VALUE_DAYS
+
+    now = now or datetime.now(timezone.utc)
+
+    ### Two days of slack: one for the partial day the season started on, one so the
+    ### START_DATE entry is never the very first entry of the response
+    needed = (now - start_datetime).days + 2
+
+    return max(MIN_MARKET_VALUE_DAYS, min(MAX_MARKET_VALUE_DAYS, needed))
 
 
 def get_start_datetime() -> datetime:
@@ -452,7 +509,77 @@ def drop_reverted_transfers(transfers: list) -> list:
     return [item for item in transfers if item["i"] not in reverted]
 
 
-def build_balance_events(transfers: list, user_name: str, initial_balance: float, start_datetime: datetime) -> list:
+def build_user_name_index(league_users: dict) -> dict:
+    """### Map manager display names to their user IDs.
+
+    Everything downstream is keyed by user ID, but the activity feed names buyer ("byr")
+    and seller ("slr") by display name only - a feed item carries no user ID at all. The
+    name therefore has to be resolved exactly once, and this is where it happens. Building
+    the same dict inside a transfer loop, as taken_free_players() used to, is both slower
+    and one more place for the two to drift apart.
+
+    Two managers sharing a display name are left out rather than guessed at. Attributing
+    their bookings to either of them would be wrong, and the old reverse dict silently
+    picked whichever came last.
+
+    Args:
+        league_users (dict): STATIC_users.json, mapping user ID to display name.
+
+    Returns:
+        dict: Display name to user ID, without the ambiguous names.
+    """
+    ids_by_name = {}
+
+    for user_id, user_name in league_users.items():
+        ids_by_name.setdefault(user_name, []).append(user_id)
+
+    index = {}
+
+    for user_name, user_ids in ids_by_name.items():
+        if len(user_ids) > 1:
+            logging.warning(
+                f"{len(user_ids)} managers share the display name '{user_name}' "
+                f"(IDs {', '.join(sorted(user_ids))}). The activity feed names them by that "
+                "name alone, so their transfers cannot be told apart and are left out."
+            )
+            continue
+
+        index[user_name] = user_ids[0]
+
+    return index
+
+
+def resolve_user_id(user_name: str, name_to_id: dict) -> str:
+    """### Look up a manager's user ID by the display name the activity feed uses.
+
+    Returns None when no manager in the league carries the name: they renamed themselves
+    since the booking, they left the league, or they share the name with someone else. The
+    booking then cannot be attributed - which used to happen silently and zeroed the buy
+    price of every player involved.
+
+    Args:
+        user_name (str): The display name from a feed item, e.g. data["byr"].
+        name_to_id (dict): The index from build_user_name_index().
+
+    Returns:
+        str: The user ID, or None if the name cannot be resolved.
+    """
+    if user_name is None:
+        return None
+
+    user_id = name_to_id.get(user_name)
+
+    if user_id is None and user_name not in _unresolved_user_names:
+        _unresolved_user_names.add(user_name)
+        logging.warning(
+            f"No manager in this league is called '{user_name}'. Their bookings cannot be "
+            "attributed - the name may have changed since, or two managers share it."
+        )
+
+    return user_id
+
+
+def build_balance_events(transfers: list, user_id: str, name_to_id: dict, initial_balance: float, start_datetime: datetime) -> list:
     """### Build the list of events that produced a manager's balance.
 
     The first event is always the starting budget, followed by every buy and sell of that
@@ -461,10 +588,15 @@ def build_balance_events(transfers: list, user_name: str, initial_balance: float
 
     Events from before the start instant are ignored, the same rule turnovers() applies.
 
+    The manager is identified by user ID, not by display name. The feed only names them,
+    so each name is resolved through the shared index first: a manager who renamed
+    themselves mid-season no longer quietly collects an empty event list, and two managers
+    sharing a name no longer collect each other's transfers.
+
     Args:
         transfers (list): Activity feed items with "t" == 15, in any order.
-        user_name (str): The manager's display name. The feed names buyer ("byr") and
-            seller ("slr") by display name, not by user ID.
+        user_id (str): The manager's user ID.
+        name_to_id (dict): The index from build_user_name_index().
         initial_balance (float): The budget every manager starts out with.
         start_datetime (datetime): The season start or league reset instant.
 
@@ -495,10 +627,15 @@ def build_balance_events(transfers: list, user_name: str, initial_balance: float
         data = item["data"]
         price = data["trp"]
 
-        ### Only one side of a transfer is named when the other side was Kickbase itself
-        if data.get("byr") == user_name:
+        ### Only one side of a transfer is named when the other side was Kickbase itself.
+        ### An unresolvable name gives None, which must never match a manager, so both
+        ### sides are checked for that explicitly.
+        buyer_id = resolve_user_id(data.get("byr"), name_to_id)
+        seller_id = resolve_user_id(data.get("slr"), name_to_id)
+
+        if buyer_id is not None and buyer_id == user_id:
             event_type, amount, trade_partner = "buy", -price, data.get("slr")
-        elif data.get("slr") == user_name:
+        elif seller_id is not None and seller_id == user_id:
             event_type, amount, trade_partner = "sell", price, data.get("byr")
         else:
             continue

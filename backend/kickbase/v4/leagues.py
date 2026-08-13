@@ -31,15 +31,23 @@ _user_stats_cache = {}
 _user_performance_cache = {}
 _battles_cache = {}
 
+### The market value window this run settled on. Decided on the first request and only
+### widened if Kickbase does not serve it, so the fallback costs one request, not one per
+### player. See player_marketvalue().
+_market_value_days = None
+
 
 def clear_caches() -> None:
     """### Empty the per-run API caches."""
+    global _market_value_days
+
     _player_statistics_cache.clear()
     _player_marketvalue_cache.clear()
     _transfers_cache.clear()
     _user_stats_cache.clear()
     _user_performance_cache.clear()
     _battles_cache.clear()
+    _market_value_days = None
 
     miscellaneous.clear_caches()
 
@@ -176,32 +184,88 @@ def player_statistics(token: str, league_id: str, player_id: str):
     return json_response
 
 
-def player_marketvalue(token: str, player_id: str):
+def player_marketvalue(token: str, player_id: str, days: int = None):
     """
     ### Get the market value history of a given player.
 
     Cached per player for the duration of the run.
+
+    Only as many days as the run actually reads are requested, instead of a full year for
+    every player on every run. See miscellaneous.market_value_days() for what decides the
+    window.
+
+    Args:
+        token (str): The user's kkstrauth token.
+        player_id (str): The player to fetch the history for.
+        days (int): Override the window. Defaults to what the run needs.
+
+    Returns:
+        list: The history, oldest first, one entry per day.
     """
+    global _market_value_days
+
     cache_key = str(player_id)
     if cache_key in _player_marketvalue_cache:
         return _player_marketvalue_cache[cache_key]
 
-    url_1year = f"https://api.kickbase.com/v4/competitions/1/players/{player_id}/marketValue/365"
+    if days is None:
+        if _market_value_days is None:
+            _market_value_days = miscellaneous.market_value_days()
+        days = _market_value_days
+
+    history = _fetch_marketvalue(token, player_id, days)
+
+    ### /marketValue/365 is the only window this project has ever asked for, so a shorter
+    ### one going unanswered is a real possibility. Falling back keeps the run alive, and
+    ### remembering the fallback keeps it to one wasted request instead of one per player.
+    if history is None and days != miscellaneous.MAX_MARKET_VALUE_DAYS:
+        logging.warning(f"Kickbase did not serve a {days} day market value window. "
+                        f"Falling back to {miscellaneous.MAX_MARKET_VALUE_DAYS} days for the rest of this run.")
+        _market_value_days = miscellaneous.MAX_MARKET_VALUE_DAYS
+        history = _fetch_marketvalue(token, player_id, _market_value_days)
+
+    if history is None:
+        raise exceptions.KickbaseException(
+            f"Couldn't get the market value history of player {player_id}.")
+
+    _player_marketvalue_cache[cache_key] = history
+
+    return history
+
+
+def _fetch_marketvalue(token: str, player_id: str, days: int):
+    """### Ask for one player's market value history over a given window.
+
+    Args:
+        token (str): The user's kkstrauth token.
+        player_id (str): The player to fetch the history for.
+        days (int): How many days to ask for.
+
+    Returns:
+        list: The "it" list, or None if Kickbase did not answer with one.
+    """
+    url = f"https://api.kickbase.com/v4/competitions/1/players/{player_id}/marketValue/{days}"
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
         "Cookie": f"kkstrauth={token};",
     }
 
-    ### Send GET request to get the market value changes of ALL players in the league
+    ### Send GET request to get the market value history of the given player
     try:
-        json_response = requests.get(url_1year, headers=headers).json()
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") # TODO: Change exception
+        response = requests.get(url, headers=headers)
+    except Exception as e:
+        raise exceptions.KickbaseException(
+            f"Couldn't reach Kickbase for the market value history of player {player_id}: {e}")
 
-    _player_marketvalue_cache[cache_key] = json_response["it"]
+    ### A window the API does not serve comes back as an error status, not as an exception
+    if response.status_code != 200:
+        return None
 
-    return json_response["it"] ### Only return the "it" list
+    try:
+        return response.json()["it"]
+    except Exception:
+        return None
 
 
 def get_users(token: str, league_id: str):

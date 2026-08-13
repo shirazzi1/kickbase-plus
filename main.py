@@ -18,22 +18,36 @@ from backend.paths import LOG_DIR, DATA_DIR, TIMESTAMP_DIR
 
 __version__ = getenv("REACT_APP_VERSION", "Warning: Couldn't load version")
 
+### Log rotation. Size based on purpose: the old handlers rotated on a timer with
+### backupCount=0, which never deletes anything - the DEBUG log had grown past 9 MB and
+### kept growing with every run. A run writes a fixed amount, not a daily one, so a byte
+### budget is what actually bounds the disk usage.
+###
+### Each file is capped at maxBytes and keeps that many rotated copies, so the ceiling is
+### maxBytes * (backupCount + 1) per log.
+LOG_MAX_BYTES = 5 * 1024 * 1024          # 5 MB per INFO log file, 20 MB in total
+VERBOSE_LOG_MAX_BYTES = 10 * 1024 * 1024 # 10 MB per DEBUG log file, 40 MB in total
+LOG_BACKUP_COUNT = 3
 
-def main() -> None:
-    """### This is the main function of the Kickbase Insights program.
 
-    It performs various tasks related to logging, user login, and data retrieval from the Kickbase API.
+def build_logging_config(log_dir: str) -> dict:
+    """### Build the logging configuration for a given log directory.
+
+    Kept out of main() so a test can check the rotation settings without logging in to
+    Kickbase first.
+
+    Args:
+        log_dir (str): The directory the log files are written to.
+
+    Returns:
+        dict: A configuration for logging.config.dictConfig().
     """
-    ### Ensure directories exist
-    makedirs(LOG_DIR, exist_ok=True)
-    makedirs(TIMESTAMP_DIR, exist_ok=True)
-
     ### Define the log file paths
-    log_file_path = path.join(LOG_DIR, "kickbase-insights.log")
-    verbose_log_file_path = path.join(LOG_DIR, "kickbase-insights-verbose.log")
+    log_file_path = path.join(log_dir, "kickbase-insights.log")
+    verbose_log_file_path = path.join(log_dir, "kickbase-insights-verbose.log")
 
     ### Set logging settings for the Python logging module
-    LOGGING = {
+    return {
         "version": 1,
         "disable_existing_loggers": False,
         "formatters": {
@@ -51,21 +65,19 @@ def main() -> None:
         "handlers": {
             "file": { # Log only INFO and higher to file (simple format)
                 "level": "INFO",
-                "class": "logging.handlers.TimedRotatingFileHandler",
+                "class": "logging.handlers.RotatingFileHandler",
                 "filename": log_file_path,
-                "when": "D",
-                "interval": 30, # overwrite interval in days
-                "backupCount": 0, # don't keep any backups
+                "maxBytes": LOG_MAX_BYTES,
+                "backupCount": LOG_BACKUP_COUNT,
                 "formatter": "simple",
                 "encoding": "utf-8",
             },
             "verbose_file": { # Log EVERYTHING to file (verbose format)
                 "level": "DEBUG",
-                "class": "logging.handlers.TimedRotatingFileHandler",
+                "class": "logging.handlers.RotatingFileHandler",
                 "filename": verbose_log_file_path,
-                "when": "D",
-                "interval": 14, # overwrite interval in days
-                "backupCount": 0, # don't keep any backups
+                "maxBytes": VERBOSE_LOG_MAX_BYTES,
+                "backupCount": LOG_BACKUP_COUNT,
                 "formatter": "verbose",
                 "encoding": "utf-8",
             },
@@ -84,8 +96,19 @@ def main() -> None:
             },
         },
     }
+
+
+def main() -> None:
+    """### This is the main function of the Kickbase Insights program.
+
+    It performs various tasks related to logging, user login, and data retrieval from the Kickbase API.
+    """
+    ### Ensure directories exist
+    makedirs(LOG_DIR, exist_ok=True)
+    makedirs(TIMESTAMP_DIR, exist_ok=True)
+
     ### Configure logging with the settings from the dictionary
-    dictConfig(LOGGING)
+    dictConfig(build_logging_config(LOG_DIR))
 
     ### Validate START_DATE before doing any work.
     ### entrypoint.py checks this for Docker runs, but running main.py directly skips
@@ -254,7 +277,23 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
         else:
             expiration = None
 
+        ### When the listing went up. Unlike the expiry, Kickbase sends this for every
+        ### listing, so it is the one age signal that also exists for the user listings -
+        ### exactly the rows where "Ablaufdatum" stays empty. Normalised to an explicit UTC
+        ### offset, otherwise the frontend reads it as local time.
+        listed_since = None
+
+        if player.listedsince:
+            try:
+                listed_since = miscellaneous.parse_feed_timestamp(player.listedsince).isoformat()
+            except ValueError:
+                logging.warning(f"Couldn't read the listing date '{player.listedsince}' "
+                                f"of player {player.firstName} {player.lastName} (PID: {player.id}).")
+
         player_info = {
+            ### The row identity. The table used to key its rows by array position, so a
+            ### sale shifted every row below it onto a different player.
+            "playerId": player.id,
             "teamId": player.teamId,
             "position": miscellaneous.POSITIONS[player.position],
             "firstName": f"{player.firstName}",
@@ -267,6 +306,10 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
             "seller": player.username or "Kickbase",
             "isFreeAgent": not player.username,
             "expiration": expiration,
+            "listedSince": listed_since,
+            ### How many managers are bidding. Kickbase never reveals whose bids they are,
+            ### only how many there are.
+            "offerCount": player.ofc,
             **deltas,
         }
 
@@ -368,17 +411,27 @@ def taken_free_players(user_token: str, selected_league: object):
     ### Get all transfers in the league
     all_transfers = leagues.transfers(user_token, selected_league.id)
 
+    ### Built once, not once per transfer: the old code rebuilt this reverse mapping inside
+    ### the loop below, and a name it could not resolve landed under the key None, where no
+    ### owner ever matches it. The buy price then silently fell back to the season start
+    ### market value. resolve_user_id() says so out loud instead.
+    name_to_id = miscellaneous.build_user_name_index(league_users)
+
     ### Create a dictionary to store buy prices from transfers
     buy_prices = {}
     for transfer in all_transfers:
         if "byr" in transfer["data"]:
-            user_id = {value: key for key, value in league_users.items()}.get(transfer["data"]["byr"]) # Reverse mapping from user name to user ID
+            user_id = miscellaneous.resolve_user_id(transfer["data"]["byr"], name_to_id)
+
+            if user_id is None:
+                continue
+
             player_id = transfer["data"]["pi"]
             buy_price = transfer["data"]["trp"]
 
             if user_id not in buy_prices:
                 buy_prices[user_id] = []
-            
+
             buy_prices[user_id].append((player_id, buy_price))
 
     ### Cycle through all teams
@@ -531,6 +584,12 @@ def turnovers(user_token: str, selected_league: object) -> None:
     ### have a start of season market value invented for it as its buy price
     all_transfers = miscellaneous.drop_reverted_transfers(all_transfers)
 
+    ### The feed names managers, it does not identify them. Everything downstream keys on
+    ### the ID that this index resolves the name to.
+    with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
+        league_users = json.load(f)
+    name_to_id = miscellaneous.build_user_name_index(league_users)
+
     ### Process the transfers as usual
     transfers = []
 
@@ -540,30 +599,47 @@ def turnovers(user_token: str, selected_league: object) -> None:
         if item["t"] == 15:
             if "slr" in item["data"] and "byr" in item["data"]:
                 transfer_type = "sell"
-                user = item["data"]["slr"]
+                manager = item["data"]["slr"]
                 trade_partner = item["data"]["byr"]
             elif "slr" in item["data"]:
                 transfer_type = "sell"
-                user = item["data"]["slr"]
+                manager = item["data"]["slr"]
                 trade_partner = "Kickbase"
             elif "byr" in item["data"]:
                 transfer_type = "buy"
-                user = item["data"]["byr"]
+                manager = item["data"]["byr"]
                 trade_partner = "Kickbase"
             else:
                 transfer_type = "unknown"
         else:
             transfer_type = "unknown"
 
+        ### A booking naming neither side cannot be attributed. Carrying on would reuse the
+        ### previous iteration's manager and trade partner, which are still bound here.
+        if transfer_type == "unknown":
+            logging.warning(f"Skipping activity feed item {item['i']} from {item['dt']}: "
+                            "it names neither a buyer nor a seller.")
+            continue
+
         ### Search the stats of the given player ID to fill the missing attributes for the player
         player_stats = leagues.player_statistics(user_token, selected_league.id, item["data"]["pi"])
 
-        ### Create a custom json dict for every transfer
+        ### "Kickbase" is this project's own label for the market, not a manager, so it has
+        ### no user ID to look up
+        trade_partner_id = None
+        if trade_partner != "Kickbase":
+            trade_partner_id = miscellaneous.resolve_user_id(trade_partner, name_to_id)
+
+        ### Create a custom json dict for every transfer.
+        ### The names stay in, because the frontend shows them. The IDs are what everything
+        ### joins on: balances() and calculate_revenue_data_daily() both read this file back.
         transfers.append({
             "date": item["dt"],
             "type": transfer_type,
-            "user": user,
+            "user": manager,
+            "userId": miscellaneous.resolve_user_id(manager, name_to_id),
             "tradePartner": trade_partner,
+            "tradePartnerId": trade_partner_id,
             "price": item["data"]["trp"],
             "playerId": item["data"]["pi"],
             "teamId": item["data"]["tid"],
@@ -635,6 +711,8 @@ def turnovers(user_token: str, selected_league: object) -> None:
             buy_transfer = {"date": date,
                             "type": "assigned_at_start",
                             "user": transfer["user"],
+                            "userId": transfer["userId"],
+                            "tradePartnerId": None,
                             "tradePartner": "Kickbase",
                             "price": price,
                             "playerId": transfer["playerId"],
@@ -670,31 +748,36 @@ def team_value_per_match_day(user_token: str, selected_league: object) -> None:
 
     ### Get all match days of the season
     current_match_day, match_days_list = competitions.match_days(user_token)
-    
-    ### Loop through all users in the league
+
     with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
+
+    ### One request per match day, not one per manager and match day. A ranking response
+    ### already carries every manager's team value, so asking again for each of them was
+    ### 34 requests worth of information spread over 340.
+    team_values_per_match_day = {}
+
+    for match_day in match_days_list:
+        ### Skip processing if the match day is in the future
+        if match_day["day"] > current_match_day:
+            continue
+
+        ranking_data = leagues.ranking(user_token, selected_league.id, match_day["day"])
+        team_values_per_match_day[match_day["day"]] = {
+            real_user["i"]: real_user["tv"] for real_user in ranking_data["us"]
+        }
+
+    ### Loop through all users in the league
     for user_id, user_name in league_users.items():
         ### Get the team value for each match day
         team_value = {match_day: 0 for match_day in range(1, current_match_day + 1)}
-    
-        ### Loop through all match days
-        for match_day in match_days_list:
-            ### Skip processing if the match day is in the future
-            if match_day["day"] > current_match_day:
-                continue
-        
-            ranking_data = leagues.ranking(user_token, selected_league.id, match_day["day"])
-            team_value_on_match_day = None
 
-            for real_user in ranking_data["us"]:
-                if real_user["i"] == user_id:
-                    team_value_on_match_day = real_user["tv"]
-                    break
-        
-            if len(team_value) >= match_day["day"]:
-                team_value[match_day["day"]] = team_value_on_match_day
-        
+        for day, team_values_by_user in team_values_per_match_day.items():
+            ### A manager missing from a ranking has no team value for that day, which is
+            ### not the same as a team value of zero
+            if len(team_value) >= day:
+                team_value[day] = team_values_by_user.get(user_id)
+
         final_team_value[user_name] = team_value
 
     logging.info("Calculated team value per match day.")
@@ -892,6 +975,10 @@ def balances(user_token: str, selected_league: object) -> None:
     with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
 
+    ### The feed names managers by display name only, so every attribution below goes
+    ### through this one index instead of comparing names directly
+    name_to_id = miscellaneous.build_user_name_index(league_users)
+
     ### Look the profile pictures up all at once. A user without one costs a full
     ### timeout, so doing them one by one dominated the runtime of this function.
     miscellaneous.prefetch_profilepics(league_users.keys())
@@ -919,7 +1006,10 @@ def balances(user_token: str, selected_league: object) -> None:
         try:
             with open(turnovers_path, "r") as f:
                 for buy, sell in json.load(f):
-                    turnovers_by_user.setdefault(sell["user"], []).append((buy, sell))
+                    ### A turnovers.json written before this change carries no "userId"
+                    ### yet, so the display name is still good for one fallback
+                    seller_id = sell.get("userId") or miscellaneous.resolve_user_id(sell["user"], name_to_id)
+                    turnovers_by_user.setdefault(seller_id, []).append((buy, sell))
         except json.JSONDecodeError:
             logging.warning(f"{turnovers_path} is empty or invalid. No transfer achievements.")
 
@@ -940,7 +1030,7 @@ def balances(user_token: str, selected_league: object) -> None:
 
         ### The events are the balance: the last one carries the current figure, and the
         ### frontend shows the same list behind the Kontostand column.
-        events = miscellaneous.build_balance_events(all_transfers, user_name, initial_balance, start_datetime)
+        events = miscellaneous.build_balance_events(all_transfers, user_id, name_to_id, initial_balance, start_datetime)
         balance = events[-1]["balance"]
 
         logging.debug(f"User: {user_name}; Starter balance: {initial_balance}; Balance after {len(events) - 1} transfer(s): {balance}")
@@ -954,7 +1044,7 @@ def balances(user_token: str, selected_league: object) -> None:
             user_stats.get("t", 0),
             team_value,
             balance_for_reward_check,
-            turnovers_by_user.get(user_name, []),
+            turnovers_by_user.get(user_id, []),
             user_stats["mdw"],
             miscellaneous.matchday_points(
                 leagues.user_performance(user_token, selected_league.id, user_id)),

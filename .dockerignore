@@ -16,6 +16,10 @@ repo_pictures/
 
 ### Ignore auto generated files
 frontend/node_modules/
-frontend/src/data/*.json
-frontend/src/data/timestamps/*.
+### The whole data directory, not just the JSON files directly in it. The old pattern
+### "frontend/src/data/timestamps/*." ended in a dot and therefore matched nothing, so
+### every timestamp file from the build machine was baked into the published image.
+### main.py runs before "npm install"/"npm start" in entrypoint.py and recreates the
+### directory, so nothing in the image needs it.
+frontend/src/data/
 logs/

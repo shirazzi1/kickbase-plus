@@ -27,6 +27,10 @@ PASSED = []
 START = datetime(2026, 8, 1, 18, 0, 0, tzinfo=timezone.utc)
 INITIAL = 50_000_000
 MANAGER = "Blida FC"
+MANAGER_ID = "3854976"
+
+### STATIC_users.json as the league writes it: user ID to display name
+LEAGUE_USERS = {MANAGER_ID: MANAGER, "2592773": "Jonny", "1234567": "Gianluca"}
 
 
 def check(name, fn):
@@ -58,9 +62,10 @@ def transfer(dt, price, buyer=None, seller=None, name="Müller", team="8", image
     return {"i": dt, "t": 15, "coc": 0, "data": data, "dt": dt}
 
 
-def build(transfers):
+def build(transfers, league_users=None):
     """Run the function under test with the shared fixtures."""
-    return miscellaneous.build_balance_events(transfers, MANAGER, INITIAL, START)
+    name_to_id = miscellaneous.build_user_name_index(league_users or LEAGUE_USERS)
+    return miscellaneous.build_balance_events(transfers, MANAGER_ID, name_to_id, INITIAL, START)
 
 
 ### ===============================================================================
@@ -171,6 +176,31 @@ def test_missing_player_image_stays_none():
     assert events[1]["playerImage"] is None, f"expected no image URL, got {events[1]}"
 
 
+def test_the_manager_is_identified_by_id_not_by_name():
+    """Two managers sharing a display name used to collect each other's transfers.
+
+    The feed names them and nothing else, so the only honest answer is to attribute the
+    booking to neither - loudly, via build_user_name_index().
+    """
+    namesakes = {MANAGER_ID: MANAGER, "9999999": MANAGER}
+
+    events = build([
+        transfer("2026-08-02T10:00:00Z", 1_000_000, buyer=MANAGER),
+    ], league_users=namesakes)
+
+    assert len(events) == 1, \
+        f"an ambiguous name must not be credited to either manager, got {events}"
+
+
+def test_a_name_no_manager_carries_is_not_attributed():
+    """A manager who renamed themselves leaves their old name behind in the feed."""
+    events = build([
+        transfer("2026-08-02T10:00:00Z", 1_000_000, buyer="Someone Who Left"),
+    ])
+
+    assert len(events) == 1, f"expected only the start event, got {events}"
+
+
 def test_the_input_list_is_not_reordered():
     ### The feed is cached per run and shared with turnovers(), so sorting it in place
     ### would silently reorder it for every other caller
@@ -212,6 +242,10 @@ if __name__ == "__main__":
           test_player_image_gets_the_cdn_prefix)
     check("a missing player image stays none",
           test_missing_player_image_stays_none)
+    check("the manager is identified by id, not by name",
+          test_the_manager_is_identified_by_id_not_by_name)
+    check("a name no manager carries is not attributed",
+          test_a_name_no_manager_carries_is_not_attributed)
     check("the input list is not reordered",
           test_the_input_list_is_not_reordered)
 
