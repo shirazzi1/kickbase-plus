@@ -318,6 +318,34 @@ def market_value_deltas(market_value_history: list) -> dict:
     }
 
 
+def average_daily_growth(market_value_history: list, days: int):
+    """### The mean daily market value change over the last `days` days.
+
+    Measured as one difference across the window rather than as a mean of daily deltas,
+    which is the same number - the deltas telescope - and needs one subtraction instead
+    of `days` of them.
+
+    A history too short for the window has no answer rather than an answer of zero. A
+    player added to the competition last week has no 30 day pace, and calling it zero
+    would rank them alongside a genuinely stagnant one.
+
+    Args:
+        market_value_history (list): A player_marketvalue response, oldest first, each
+            entry with "mv".
+        days (int): The window to average over. Needs days + 1 entries to measure across.
+
+    Returns:
+        float: The mean daily change, negative for a falling market value. None if the
+            history does not cover the window.
+    """
+    history = market_value_history or []
+
+    if len(history) < days + 1:
+        return None
+
+    return (history[-1]["mv"] - history[-1 - days]["mv"]) / days
+
+
 def get_start_datetime() -> datetime:
     """### Parse the START_DATE environment variable.
 
