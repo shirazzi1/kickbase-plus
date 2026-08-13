@@ -1,4 +1,10 @@
-import { relativeChange, daysToBreakEven, breakEvenBid } from "./marketFormulas"
+import {
+    relativeChange, daysToBreakEven, breakEvenBid, formatDuration, elapsedSince,
+} from "./marketFormulas"
+
+const MINUTE = 60 * 1000
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
 
 describe("relativeChange", () => {
     it("expresses a move as a share of the market value", () => {
@@ -86,5 +92,52 @@ describe("breakEvenBid", () => {
                 expect(daysToBreakEven({ ...base, price: bid })).toBeCloseTo(targetDays, 4)
             }
         }
+    })
+})
+
+describe("formatDuration", () => {
+    it("shows the two largest units that carry information", () => {
+        expect(formatDuration(2 * DAY + 3 * HOUR + 40 * MINUTE)).toBe("2 Tage 3 Std.")
+        expect(formatDuration(3 * HOUR + 40 * MINUTE)).toBe("3 Std. 40 Min.")
+        expect(formatDuration(45 * MINUTE)).toBe("45 Min.")
+    })
+
+    it("drops a trailing zero unit instead of printing it", () => {
+        expect(formatDuration(2 * DAY)).toBe("2 Tage")
+        expect(formatDuration(3 * HOUR)).toBe("3 Std.")
+    })
+
+    it("keeps the singular for a single day", () => {
+        expect(formatDuration(DAY + 2 * HOUR)).toBe("1 Tag 2 Std.")
+    })
+
+    it("clamps a span that already ran out", () => {
+        // A countdown reading "-3 Std." looks like a listing running backwards
+        expect(formatDuration(-3 * HOUR)).toBe("0 Min.")
+    })
+
+    it("has nothing to say about a missing span", () => {
+        expect(formatDuration(null)).toBeNull()
+        expect(formatDuration(undefined)).toBeNull()
+        expect(formatDuration(NaN)).toBeNull()
+    })
+})
+
+describe("elapsedSince", () => {
+    const now = Date.parse("2026-08-13T12:00:00Z")
+
+    it("measures the span back to the timestamp", () => {
+        expect(elapsedSince("2026-08-13T09:00:00Z", now)).toBe(3 * HOUR)
+    })
+
+    it("reads a timestamp with an explicit offset as written", () => {
+        expect(elapsedSince("2026-08-13T11:00:00+00:00", now)).toBe(HOUR)
+    })
+
+    it("has no answer for a missing or unreadable timestamp", () => {
+        // Not every listing carries a date, and a NaN would sort ahead of every real value
+        expect(elapsedSince(null, now)).toBeNull()
+        expect(elapsedSince(undefined, now)).toBeNull()
+        expect(elapsedSince("not a date", now)).toBeNull()
     })
 })

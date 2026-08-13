@@ -7,6 +7,9 @@ TODO: Maybe list all functions here automatically?
 import requests
 import json
 import logging
+import os
+import shutil
+import tempfile
 
 import pandas as pd
 from collections import Counter
@@ -14,9 +17,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta, timezone
 from os import getenv, path, makedirs
 from zoneinfo import ZoneInfo
-from backend.paths import DATA_DIR, TIMESTAMP_DIR
+from backend.paths import DATA_DIR, LAST_GOOD_DIR, TIMESTAMP_DIR
 
 from backend import exceptions
+from backend.kickbase import http
 
 ### ===============================================================================
 
@@ -120,10 +124,15 @@ MATCHDAY_POINT_TIERS = [(1_000, 701), (1_500, 702), (2_000, 703)]
 ### balances() and league_user_stats_tables() ask for every user.
 _profilepic_cache = {}
 
+### Display names out of the activity feed that no manager in the league carries. Kept so
+### the warning is logged once per name instead of once per booking.
+_unresolved_user_names = set()
+
 
 def clear_caches() -> None:
     """### Empty the per-run caches held in this module."""
     _profilepic_cache.clear()
+    _unresolved_user_names.clear()
 
 
 POSITIONS = {1: "TW", 2: "ABW", 3: "MF", 4: "ANG"}
@@ -168,10 +177,10 @@ def discord_notification(title: str, message: str, color: int, webhook_url: str)
         webhook_url (str): Webhook URL to send the notification to.
 
     Raises:
-        WIP! TODO!
+        exceptions.NotificatonException: The webhook could not be reached or refused the
+            message. Here the message really is about the webhook - unlike the fifteen
+            Kickbase call sites that used to borrow it.
     """
-    url = webhook_url
-    headers = {"Content-Type": "application/json"}
     payload = {
         "username": "Kickbase",
         "avatar_url": "https://upload.wikimedia.org/wikipedia/commons/2/2c/Kickbase_Logo.jpg",
@@ -184,11 +193,14 @@ def discord_notification(title: str, message: str, color: int, webhook_url: str)
         ]
     }
 
-    ### Send POST request to Webhook
+    ### Send POST request to Webhook. Routed through the shared client for the timeout:
+    ### this call had none either, and a stalled Discord parked the run just as surely as
+    ### a stalled Kickbase did.
     try:
-        requests.post(url, json=payload, headers=headers)
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.")
+        http.post_no_json(webhook_url, payload)
+    except exceptions.HttpException as e:
+        raise exceptions.NotificatonException(
+            f"Notification failed! Please check your Discord Webhook URL. {e}") from e
 
 
 def calculate_revenue_data_daily(turnovers: dict) -> None:
@@ -203,16 +215,24 @@ def calculate_revenue_data_daily(turnovers: dict) -> None:
     with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
 
-    ### Create an empty dict with all user names as keys
-    user_transfer_revenue = {user_name: [] for user_name in league_users.values()}
+    ### Create an empty dict with all user IDs as keys. The chart legend needs the names,
+    ### but the grouping goes by ID: a manager who renamed themselves mid-season would
+    ### otherwise end up as two series, one of them empty.
+    user_transfer_revenue = {user_id: [] for user_id in league_users}
+
+    name_to_id = build_user_name_index(league_users)
 
     ### This loop iterates over each buy-sell pair in the turnovers list. It calculates the revenue by subtracting the buy value from the sell value.
     ### The revenue and the date of the sell transfer are then appended to the corresponding user's list in user_transfer_revenue.
-    
+
     for buy, sell in turnovers:
         revenue = sell["price"] - buy["price"]
-        if buy["user"] in league_users.values():
-            user_transfer_revenue[buy["user"]].append((revenue, sell["date"]))
+        ### turnovers.json written before this change carries no "userId" yet, so the
+        ### display name is still good for one fallback
+        user_id = buy.get("userId") or resolve_user_id(buy["user"], name_to_id)
+
+        if user_id in user_transfer_revenue:
+            user_transfer_revenue[user_id].append((revenue, sell["date"]))
 
     ### Add start and end points for the graph.
     ### Both are timezone aware UTC, so they line up with the feed timestamps that make
@@ -236,17 +256,21 @@ def calculate_revenue_data_daily(turnovers: dict) -> None:
         dataframes[user] = df
 
     ### Here, the data is formatted into a dictionary called data.
-    ### Each user's name is a key, and the corresponding value is a list of tuples containing revenue and date information
+    ### Each user's name is a key, and the corresponding value is a list of tuples containing revenue and date information.
+    ### The chart uses the key as the series label, so the ID is translated back here - at
+    ### the last possible moment, after all the grouping has been done on the ID.
     data = {user_name: [] for user_name in league_users.values()}
-    for user, df in dataframes.items():
+    for user_id, df in dataframes.items():
+        user_name = league_users[user_id]
+
         for entry in df.to_numpy().tolist():
-            data[user].append((entry[0], entry[1]))
+            data[user_name].append((entry[0], entry[1]))
 
     logging.info("Calculated daily revenue data.")
 
     ### Save to file + timestamp
     write_json_to_file(data, "revenue_sum.json")
-    write_json_to_file({"time": datetime.now().isoformat()}, "ts_revenue_sum.json")
+    write_timestamp("ts_revenue_sum.json", rows=len(data))
 
 
 def get_player_owner(player_stats: dict, league_id: str) -> dict:
@@ -344,6 +368,46 @@ def average_daily_growth(market_value_history: list, days: int):
         return None
 
     return (history[-1]["mv"] - history[-1 - days]["mv"]) / days
+
+
+### How far back a market value history has to reach.
+###
+### Two callers decide this. market_value_deltas() reads the last 31 entries, and
+### taken_free_players() and turnovers() scan back to START_DATE for the value a player
+### assigned at the season start counts as their buy price. So the answer is "31 days, or
+### back to the season start, whichever is further" - which early in a season is a small
+### fraction of the year that was downloaded for every player before.
+###
+### The upper bound is the window the API is known to serve, and the one every request used
+### to ask for.
+MIN_MARKET_VALUE_DAYS = 31
+MAX_MARKET_VALUE_DAYS = 365
+
+
+def market_value_days(now: datetime = None) -> int:
+    """### How many days of market value history a run actually needs.
+
+    Falls back to the full year if START_DATE cannot be read. Asking for too much only
+    costs bandwidth; asking for too little would invent buy prices.
+
+    Args:
+        now (datetime): The instant to measure the season length against, normally now.
+
+    Returns:
+        int: A window between MIN_MARKET_VALUE_DAYS and MAX_MARKET_VALUE_DAYS.
+    """
+    try:
+        start_datetime = get_start_datetime()
+    except exceptions.KickbaseException:
+        return MAX_MARKET_VALUE_DAYS
+
+    now = now or datetime.now(timezone.utc)
+
+    ### Two days of slack: one for the partial day the season started on, one so the
+    ### START_DATE entry is never the very first entry of the response
+    needed = (now - start_datetime).days + 2
+
+    return max(MIN_MARKET_VALUE_DAYS, min(MAX_MARKET_VALUE_DAYS, needed))
 
 
 def get_start_datetime() -> datetime:
@@ -544,7 +608,77 @@ def drop_reverted_transfers(transfers: list) -> list:
     return [item for item in transfers if item["i"] not in reverted]
 
 
-def build_balance_events(transfers: list, user_name: str, initial_balance: float, start_datetime: datetime) -> list:
+def build_user_name_index(league_users: dict) -> dict:
+    """### Map manager display names to their user IDs.
+
+    Everything downstream is keyed by user ID, but the activity feed names buyer ("byr")
+    and seller ("slr") by display name only - a feed item carries no user ID at all. The
+    name therefore has to be resolved exactly once, and this is where it happens. Building
+    the same dict inside a transfer loop, as taken_free_players() used to, is both slower
+    and one more place for the two to drift apart.
+
+    Two managers sharing a display name are left out rather than guessed at. Attributing
+    their bookings to either of them would be wrong, and the old reverse dict silently
+    picked whichever came last.
+
+    Args:
+        league_users (dict): STATIC_users.json, mapping user ID to display name.
+
+    Returns:
+        dict: Display name to user ID, without the ambiguous names.
+    """
+    ids_by_name = {}
+
+    for user_id, user_name in league_users.items():
+        ids_by_name.setdefault(user_name, []).append(user_id)
+
+    index = {}
+
+    for user_name, user_ids in ids_by_name.items():
+        if len(user_ids) > 1:
+            logging.warning(
+                f"{len(user_ids)} managers share the display name '{user_name}' "
+                f"(IDs {', '.join(sorted(user_ids))}). The activity feed names them by that "
+                "name alone, so their transfers cannot be told apart and are left out."
+            )
+            continue
+
+        index[user_name] = user_ids[0]
+
+    return index
+
+
+def resolve_user_id(user_name: str, name_to_id: dict) -> str:
+    """### Look up a manager's user ID by the display name the activity feed uses.
+
+    Returns None when no manager in the league carries the name: they renamed themselves
+    since the booking, they left the league, or they share the name with someone else. The
+    booking then cannot be attributed - which used to happen silently and zeroed the buy
+    price of every player involved.
+
+    Args:
+        user_name (str): The display name from a feed item, e.g. data["byr"].
+        name_to_id (dict): The index from build_user_name_index().
+
+    Returns:
+        str: The user ID, or None if the name cannot be resolved.
+    """
+    if user_name is None:
+        return None
+
+    user_id = name_to_id.get(user_name)
+
+    if user_id is None and user_name not in _unresolved_user_names:
+        _unresolved_user_names.add(user_name)
+        logging.warning(
+            f"No manager in this league is called '{user_name}'. Their bookings cannot be "
+            "attributed - the name may have changed since, or two managers share it."
+        )
+
+    return user_id
+
+
+def build_balance_events(transfers: list, user_id: str, name_to_id: dict, initial_balance: float, start_datetime: datetime) -> list:
     """### Build the list of events that produced a manager's balance.
 
     The first event is always the starting budget, followed by every buy and sell of that
@@ -553,10 +687,15 @@ def build_balance_events(transfers: list, user_name: str, initial_balance: float
 
     Events from before the start instant are ignored, the same rule turnovers() applies.
 
+    The manager is identified by user ID, not by display name. The feed only names them,
+    so each name is resolved through the shared index first: a manager who renamed
+    themselves mid-season no longer quietly collects an empty event list, and two managers
+    sharing a name no longer collect each other's transfers.
+
     Args:
         transfers (list): Activity feed items with "t" == 15, in any order.
-        user_name (str): The manager's display name. The feed names buyer ("byr") and
-            seller ("slr") by display name, not by user ID.
+        user_id (str): The manager's user ID.
+        name_to_id (dict): The index from build_user_name_index().
         initial_balance (float): The budget every manager starts out with.
         start_datetime (datetime): The season start or league reset instant.
 
@@ -587,10 +726,15 @@ def build_balance_events(transfers: list, user_name: str, initial_balance: float
         data = item["data"]
         price = data["trp"]
 
-        ### Only one side of a transfer is named when the other side was Kickbase itself
-        if data.get("byr") == user_name:
+        ### Only one side of a transfer is named when the other side was Kickbase itself.
+        ### An unresolvable name gives None, which must never match a manager, so both
+        ### sides are checked for that explicitly.
+        buyer_id = resolve_user_id(data.get("byr"), name_to_id)
+        seller_id = resolve_user_id(data.get("slr"), name_to_id)
+
+        if buyer_id is not None and buyer_id == user_id:
             event_type, amount, trade_partner = "buy", -price, data.get("slr")
-        elif data.get("slr") == user_name:
+        elif seller_id is not None and seller_id == user_id:
             event_type, amount, trade_partner = "sell", price, data.get("byr")
         else:
             continue
@@ -876,27 +1020,165 @@ def season_is_over(now: datetime) -> bool:
 def write_json_to_file(data, file_name: str) -> None:
     """Writes a JSON object to a file.
 
+    The write is atomic: the data goes into a temporary file in the same directory, is
+    flushed to disk, and only then replaces the target. A crash halfway through therefore
+    leaves the previous file untouched instead of a truncated one - which mattered here
+    more than usual, because the target directory is the one the dev server watches, so
+    half a file was compiled into the bundle and blanked the whole UI.
+
+    Before a data file is replaced, its previous content is snapshotted (see
+    _snapshot_last_good). A failure is raised rather than logged: this used to swallow
+    every write error and let the run report success over a file that was never written.
+
     Args:
         data (any): data to be written to the file
         file_name (str): file name
+
+    Raises:
+        Exception: Anything that goes wrong reaches the caller - an OSError from the disk,
+            a TypeError from a payload json.dump() cannot serialise. That is the point:
+            the stage that was writing has to fail, rather than carry on over a file that
+            was never written.
     """
+    ### Check if it is a data or timestamp file
+    if file_name.startswith("ts_"):
+        target_dir, indent = TIMESTAMP_DIR, None
+    else:
+        target_dir, indent = DATA_DIR, 2
+
     ### Make sure the data directories exist, since app.py can write files before main.py ever ran
     makedirs(TIMESTAMP_DIR, exist_ok=True)
+    makedirs(target_dir, exist_ok=True)
 
-    ### Check if it is a data or timestamp file
+    file_path = path.join(target_dir, file_name)
+
+    if target_dir == DATA_DIR:
+        _snapshot_last_good(file_path, file_name)
+
+    ### The temporary file has to sit in the target directory: os.replace() is only atomic
+    ### within one filesystem, and a volume mount elsewhere in the tree may well be another
+    ### one. The leading dot keeps it out of the way of anything globbing for *.json.
+    ###
+    ### That does put it inside the directory the dev server watches, which is what the
+    ### .last-good snapshots were moved out of. The difference is that this file appears
+    ### and disappears while the target is being replaced anyway - one more event per
+    ### write, not a second file per dataset - and atomicity leaves no choice.
+    handle, temp_path = tempfile.mkstemp(dir=target_dir, prefix=f".{file_name}.", suffix=".tmp")
+
     try:
-        if file_name.startswith("ts_"):
-            file_path = path.join(TIMESTAMP_DIR, file_name)
-            with open(file_path, "w") as f:
-                json.dump(data, f)
-            logging.debug(f"Created timestamp file {file_name}")
-        else:
-            file_path = path.join(DATA_DIR, file_name)
-            with open(file_path, "w") as f:
-                json.dump(data, f, indent=2)
-            logging.debug(f"Created file {file_name}")
-    except Exception as e:
-        logging.error(f"Failed to write JSON to {file_path}: {e}")
+        with os.fdopen(handle, "w") as f:
+            json.dump(data, f, indent=indent)
+            ### Flush all the way to the disk before the rename claims the data is there
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(temp_path, file_path)
+    except Exception:
+        _remove_quietly(temp_path)
+        raise
+
+    logging.debug(f"Wrote {file_name}")
+
+
+def write_timestamp(file_name: str, rows: int = None) -> None:
+    """### Stamp a dataset with the moment and the run that produced it.
+
+    The run id is what keeps per-stage isolation honest. Without it a dataset that its
+    stage failed to rewrite still carries a plausible timestamp from some earlier run, and
+    the frontend has no way to tell that apart from data written seconds ago. With it,
+    "this table is older than the rest" becomes a question the UI can answer per dataset.
+
+    "time" keeps its old name and meaning, so anything still reading only that keeps
+    working.
+
+    Args:
+        file_name (str): The timestamp file, e.g. "ts_market.json".
+        rows (int): How many rows the dataset holds, if the caller knows.
+    """
+    ### Imported here rather than at the top: backend.runs imports backend.exceptions,
+    ### which is fine, but this module is imported by almost everything and a cycle here
+    ### would be paid for everywhere.
+    from backend import runs
+
+    payload = {
+        "time": datetime.now().isoformat(),
+        "runId": runs.current_run_id(),
+    }
+
+    if rows is not None:
+        payload["rows"] = rows
+
+    write_json_to_file(payload, file_name)
+
+
+def _snapshot_last_good(file_path: str, file_name: str) -> None:
+    """### Keep the current content of a data file before it is overwritten.
+
+    The atomic write already rules out a truncated file. What it cannot rule out is a
+    stage that completes and writes something wrong - an empty list where 500 players
+    belong. The snapshot is what makes that recoverable by hand.
+
+    Only content that parses as JSON is kept, so a bad file never gets promoted to being
+    the good one. A snapshot that fails is logged and shrugged off: it must never be the
+    reason a run cannot write its data.
+
+    Args:
+        file_path (str): The file about to be replaced.
+        file_name (str): Its name, used for the snapshot.
+    """
+    if not path.exists(file_path):
+        return
+
+    try:
+        with open(file_path, "r") as f:
+            json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logging.debug(f"Not snapshotting {file_name}, it does not parse: {e}")
+        return
+
+    try:
+        makedirs(LAST_GOOD_DIR, exist_ok=True)
+        shutil.copyfile(file_path, path.join(LAST_GOOD_DIR, f"{file_name}.last-good"))
+    except OSError as e:
+        logging.warning(f"Could not snapshot the previous {file_name}: {e}")
+
+
+def _remove_quietly(file_path: str) -> None:
+    """### Delete a file, ignoring the case where it is already gone.
+
+    Args:
+        file_path (str): The file to remove.
+    """
+    try:
+        os.remove(file_path)
+    except OSError:
+        pass
+
+
+def read_last_good(file_name: str):
+    """### Read the snapshot taken before the last write of a data file.
+
+    Nothing calls this during a run - the point of the snapshot is that a human, or a
+    later restore step, has something to compare against. It lives here so the naming
+    stays in one place.
+
+    Args:
+        file_name (str): The data file's name, e.g. "market.json".
+
+    Returns:
+        The decoded JSON, or None if there is no readable snapshot.
+    """
+    snapshot_path = path.join(LAST_GOOD_DIR, f"{file_name}.last-good")
+
+    if not path.exists(snapshot_path):
+        return None
+
+    try:
+        with open(snapshot_path, "r") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning(f"Could not read the last good {file_name}: {e}")
+        return None
 
 
 def patch_market_bid(player_id: str, own_bid) -> bool:
@@ -906,10 +1188,13 @@ def patch_market_bid(player_id: str, own_bid) -> bool:
     invisible until the next scrape. Patching the row bridges that gap, and survives a
     page reload the way a value held only in React state would not.
 
-    This can race a main.py run writing the same file. The writes in this project are a
-    plain read-modify-write with no locking, so a concurrent main.py run could overwrite
-    this patch or vice versa; the next scrape repairs the row either way, so the race is
-    accepted rather than solved here.
+    This can still race a main.py run writing the same file. write_json_to_file()'s
+    replace is atomic, so a reader never sees a half-written market.json any more - but
+    that only protects one write against itself. This function's own read of the file and
+    its own write still happen without a lock around the pair, so a concurrent run's
+    write can land between the two and be silently overwritten by this one, or the other
+    way round. The next scrape repairs the row either way, so the race is accepted rather
+    than solved here.
 
     Args:
         player_id (str): The player whose row is patched.
@@ -917,6 +1202,14 @@ def patch_market_bid(player_id: str, own_bid) -> bool:
 
     Returns:
         bool: True when a row matched and the file was rewritten.
+
+    Raises:
+        Exception: Whatever write_json_to_file() raises when a matching row is found -
+            it no longer swallows a write failure (see its docstring). The caller must
+            not treat "a row matched" as "the file was rewritten" without catching this;
+            app.py's callers do, by wrapping this call and answering the same
+            "could not confirm" outcome a failed read-back gets, since a bid confirmed by
+            Kickbase and then unrecorded locally is that same shape of problem.
     """
     market_path = path.join(DATA_DIR, "market.json")
 

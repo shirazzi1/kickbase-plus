@@ -5,7 +5,7 @@ from os import getenv
 from flask import Flask, jsonify, request
 
 import main
-from backend import exceptions, miscellaneous
+from backend import exceptions, health, miscellaneous
 from backend.kickbase.v4 import leagues, user
 
 ### ===============================================================================
@@ -25,6 +25,29 @@ app = Flask(__name__)
 ### blanket CORS(app) reflects any Origin, which means any page the user's browser opens
 ### could POST/DELETE a bid that spends real money in their real league. Do not add it
 ### back to make some other cross-origin case convenient.
+
+
+@app.route("/api/health", methods=["GET"])
+def get_health():
+    """### Says whether this deployment is still doing its job.
+
+    Answering at all shows Flask is up. The body says whether the data behind it is being
+    kept current, read off the run manifest.
+
+    The status code is a restart signal, so it deliberately does not follow "was the last
+    run perfect". A stage that failed against a Kickbase outage answers 200: restarting
+    the container would not have made Kickbase reply. A scheduler that has stopped
+    answers 503, because that is a problem a restart does fix.
+    """
+    report = health.health_report()
+
+    if health.is_healthy(report):
+        return jsonify(report), 200
+
+    logging.warning(f"Health check: {report['status']} - {report['reason']}")
+
+    return jsonify(report), 503
+
 
 @app.route("/api/livepoints", methods=["GET"])
 def get_live_points():
@@ -210,19 +233,41 @@ def place_bid(player_id):
         ### shows no trace of this bid, means the *confirmation* failed - not the bid.
         ### Guessing "no bid" here would be exactly as wrong as guessing "yes", so neither
         ### branch below patches market.json or reports success.
+        ###
+        ### get_market() goes through http.get_json() now, which raises HttpException
+        ### subclasses (AuthExpiredException, ApiUnreachableException, ...), never
+        ### NotificatonException - that was the bare `except:` this module used to have
+        ### before every Kickbase call went through one HTTP client. Catching the
+        ### exception nothing here actually raises would leave this handler unreachable
+        ### and let the failure fall through to the generic 502 below, which claims the
+        ### bid failed when it may well have gone through.
         try:
             confirmed = _listing(user_token, selected_league.id, player_id)
-        except exceptions.NotificatonException:
+        except exceptions.HttpException:
             return _unconfirmed(f"the bid on player {player_id}")
 
         own_bid = confirmed.own_offer(user_info.id) if confirmed else None
         if own_bid is None:
             return _unconfirmed(f"the bid on player {player_id}")
 
-        miscellaneous.patch_market_bid(player_id, own_bid)
-    except exceptions.KickbaseWriteException as e:
+        ### The bid is confirmed by this point - only the local market.json cache is
+        ### left to update, and write_json_to_file() now raises on a failed write
+        ### instead of swallowing it (see its docstring). Left uncaught, that exception
+        ### would propagate past every handler below (none of them are KickbaseException,
+        ### an OSError or a TypeError is neither) as a bare 500, which the frontend shows
+        ### as "Flask API not reachable" with the draft still open - inviting a second
+        ### bid on top of one that already landed. Answering _unconfirmed() instead
+        ### under-states what is actually known here (the bid did happen, only the cache
+        ### write failed), but it is the one response that does not invite a retry.
+        try:
+            miscellaneous.patch_market_bid(player_id, own_bid)
+        except Exception as e:
+            logging.error(f"Flask API: the bid on player {player_id} was confirmed, but "
+                          f"market.json could not be updated: {e}")
+            return _unconfirmed(f"the bid on player {player_id}")
+    except exceptions.OfferRejectedException as e:
         logging.error(f"Flask API: Kickbase rejected the bid: {e}")
-        return jsonify({"error": str(e)}), e.status
+        return jsonify({"error": str(e)}), e.status_code
     except exceptions.LoginException as e:
         logging.error(f"Flask API: {e}")
         return jsonify({"error": "Login bei Kickbase fehlgeschlagen. Bitte Zugangsdaten prüfen."}), 502
@@ -266,18 +311,28 @@ def withdraw_bid(player_id):
         ### gone rather than trusting the 200. An idempotent 200, or the seller accepting
         ### the offer between the pre-read above and this DELETE, can both leave it
         ### standing - and reporting it gone either way is exactly the wrong guess.
+        ###
+        ### See the matching comment in place_bid(): get_market() raises HttpException
+        ### subclasses now, never NotificatonException.
         try:
             confirmed = _listing(user_token, selected_league.id, player_id)
-        except exceptions.NotificatonException:
+        except exceptions.HttpException:
             return _unconfirmed(f"the withdrawal on player {player_id}")
 
         if confirmed is not None and confirmed.own_offer(user_info.id) is not None:
             return _unconfirmed(f"the withdrawal on player {player_id}")
 
-        miscellaneous.patch_market_bid(player_id, None)
-    except exceptions.KickbaseWriteException as e:
+        ### See the matching comment in place_bid(): a patch failure here must not
+        ### escape as a 500 either, now that write_json_to_file() raises.
+        try:
+            miscellaneous.patch_market_bid(player_id, None)
+        except Exception as e:
+            logging.error(f"Flask API: the withdrawal on player {player_id} was "
+                          f"confirmed, but market.json could not be updated: {e}")
+            return _unconfirmed(f"the withdrawal on player {player_id}")
+    except exceptions.OfferRejectedException as e:
         logging.error(f"Flask API: Kickbase rejected the withdrawal: {e}")
-        return jsonify({"error": str(e)}), e.status
+        return jsonify({"error": str(e)}), e.status_code
     except exceptions.LoginException as e:
         logging.error(f"Flask API: {e}")
         return jsonify({"error": "Login bei Kickbase fehlgeschlagen. Bitte Zugangsdaten prüfen."}), 502

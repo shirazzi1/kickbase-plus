@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import Tooltip from "@mui/material/Tooltip"
 import {
     Box, Button, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle,
@@ -15,13 +15,29 @@ import {
     deltaColumnStyles,
     getStatusIcon
 } from "./SharedConstants"
-import { relativeChange, daysToBreakEven, breakEvenBid } from "./marketFormulas"
+import {
+    relativeChange, daysToBreakEven, breakEvenBid, formatDuration, elapsedSince,
+} from "./marketFormulas"
 
 // Import data
 import data from "../data/market.json"
 import config from "../data/config.json"
 
 const daysFormatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 })
+
+// How often the listing age and the remaining time are recalculated. The data itself only
+// changes when the scraper runs, but a countdown that stands still is worse than none.
+const TICK_INTERVAL_MS = 30 * 1000
+
+// A span in milliseconds, or "–" when there is nothing to say
+const durationOrDash = ({ value }) => formatDuration(value) ?? "–"
+
+// Rows without a span sort last rather than first, so ascending order puts the listings
+// that actually run out on top instead of burying them
+const missingSortsLast = (a, b) => {
+    const rank = (value) => value === null || value === undefined ? Infinity : value
+    return rank(a) - rank(b)
+}
 
 // Every market value move gets two columns side by side: the euro amount and the same
 // move as a share of the current market value, so a 100.000 € day on a cheap player can
@@ -125,6 +141,15 @@ function MarketTable() {
         else
             send(row.playerId, price)
     }
+
+    // The listing age and the remaining time are the only columns that move on their own,
+    // so the clock they are measured against is the component's state
+    const [now, setNow] = useState(() => Date.now())
+
+    useEffect(() => {
+        const timer = setInterval(() => setNow(Date.now()), TICK_INTERVAL_MS)
+        return () => clearInterval(timer)
+    }, [])
 
     // Define the columns of the table
     const columns = [
@@ -279,12 +304,60 @@ function MarketTable() {
         ...changeColumns("sevenDays", "7 Tage", 110),
         ...changeColumns("thirtyDays", "30 Tage", 120),
         {
+            field: "offerCount",
+            headerName: "Gebote",
+            type: "number",
+            width: 90,
+            headerAlign: "center",
+            align: "right",
+            cellClassName: "font-tabular-nums",
+            // Kickbase only says how many bids there are, never whose
+            valueFormatter: ({ value }) =>
+                value === null || value === undefined ? "–" : value
+        },
+        {
             field: "seller",
             headerName: "Verkäufer",
             flex: 1,
             minWidth: 110,
             headerAlign: "center",
             align: "center"
+        },
+        {
+            field: "listedFor",
+            headerName: "Gelistet seit",
+            type: "number",
+            width: 140,
+            headerAlign: "center",
+            align: "right",
+            // The one age signal that exists for user listings too, where "Ablaufdatum"
+            // is empty. A Tooltip carries the exact timestamp behind the rounded span.
+            renderCell: (params) => {
+                const label = formatDuration(params.value) ?? "–"
+
+                if (!params.row.listedSince)
+                    return label
+
+                return (
+                    <Tooltip title={new Date(params.row.listedSince).toLocaleString("de-DE")} arrow>
+                        <span>{label}</span>
+                    </Tooltip>
+                )
+            },
+            sortComparator: missingSortsLast
+        },
+        {
+            field: "remaining",
+            headerName: "Restzeit",
+            type: "number",
+            width: 130,
+            headerAlign: "center",
+            align: "right",
+            // Derived from the real expiry only. Kickbase sends one for its own listings
+            // alone, and guessing a deadline for the user listings from a listing window
+            // nobody has measured would put a wrong number where an empty cell belongs.
+            valueFormatter: durationOrDash,
+            sortComparator: missingSortsLast
         },
         {
             field: "expiration",
@@ -303,9 +376,16 @@ function MarketTable() {
     ]
 
     // Fill the rows with the players attributes from the JSON file
-    const rows = data.map((row, i) => (
-        {
-            id: i,
+    const rows = data.map((row, i) => {
+        // A Date, so the column sorts chronologically instead of by string
+        const expiration = row.expiration ? new Date(row.expiration) : null
+
+        return {
+            // The player, not their position in the file. Keyed by index, every sale
+            // shifted the rows below it onto a different player, which took the selection
+            // and the row state with it. Also what addresses the row for the bid endpoints.
+            id: row.playerId ?? `row-${i}`,
+            playerId: row.playerId,
             teamLogo: process.env.PUBLIC_URL + "/images/" + row.teamId + ".png",
             position: row.position,
             // Some players have no first name in the API, so a plain join would leave a
@@ -318,8 +398,6 @@ function MarketTable() {
             // What the asking price adds on top of the current market value. Always 0 for
             // free agents, where Kickbase asks exactly the market value.
             markup: row.marketValue ? row.price / row.marketValue - 1 : null,
-            // Addresses the row for the bid endpoints
-            playerId: row.playerId,
             // Nobody bids on their own listing
             isOwnListing: row.isOwnListing,
             // The pace both break-even figures come from, averaged in the backend over
@@ -342,12 +420,17 @@ function MarketTable() {
             sevenDaysPercent: relativeChange(row.sevenDaysAvg, row.marketValue),
             thirtyDays: row.thirtyDaysAvg,
             thirtyDaysPercent: relativeChange(row.thirtyDaysAvg, row.marketValue),
+            offerCount: row.offerCount,
             seller: row.seller,
             isFreeAgent: row.isFreeAgent,
-            // A Date, so the column sorts chronologically instead of by string
-            expiration: row.expiration ? new Date(row.expiration) : null,
+            expiration,
+            listedSince: row.listedSince,
+            // How long the listing has been up, and how long it still has to run. Both are
+            // spans in milliseconds so they sort by length rather than by their label.
+            listedFor: elapsedSince(row.listedSince, now),
+            remaining: expiration ? expiration.getTime() - now : null,
         }
-    ))
+    })
 
     // Populate the table
     return (

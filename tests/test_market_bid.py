@@ -20,6 +20,7 @@ from os import makedirs, path
 sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
 
 from backend import exceptions, miscellaneous
+from backend.kickbase import http
 from backend.kickbase.endpoints.leagues import Market_Players
 from backend.kickbase.v4 import leagues
 
@@ -69,33 +70,69 @@ class FakeResponse:
         return self._body
 
 
-class Recorder:
-    """Stands in for requests.post/requests.delete and records the call."""
+class FakeSession:
+    """Stands in for the pooled session http.request() asks for.
 
-    def __init__(self, response):
+    place_offer()/remove_offer() go through backend.kickbase.http now, the same client
+    every read in this project uses - see backend/kickbase/http.py and its own
+    tests/test_http.py, which this class mirrors. A session records every call it
+    receives, so a test can assert on the method, url, payload, headers and timeout
+    without needing a real socket.
+    """
+
+    def __init__(self, response=None, raises=None):
+        ### Either a single response reused for every call, or one to raise instead
         self.response = response
-        self.url = None
-        self.json = None
-        self.headers = None
-        self.timeout = None
+        self.raises = raises
+        self.calls = []
 
-    def __call__(self, url, json=None, headers=None, timeout=None):
-        self.url, self.json, self.headers, self.timeout = url, json, headers, timeout
-        if isinstance(self.response, Exception):
-            raise self.response
+    def _answer(self, method, url, headers, timeout, payload=None):
+        self.calls.append({"method": method, "url": url, "headers": headers,
+                           "timeout": timeout, "payload": payload})
+
+        if self.raises is not None:
+            raise self.raises
+
         return self.response
 
+    def get(self, url, headers=None, timeout=None):
+        return self._answer("GET", url, headers, timeout)
 
-def with_fake(method, response, fn):
-    """Run fn with requests.<method> replaced, and return the recorder."""
-    recorder = Recorder(response)
-    original = getattr(leagues.requests, method)
-    setattr(leagues.requests, method, recorder)
+    def post(self, url, json=None, headers=None, timeout=None):
+        return self._answer("POST", url, headers, timeout, payload=json)
+
+    def delete(self, url, headers=None, timeout=None):
+        return self._answer("DELETE", url, headers, timeout)
+
+
+def with_session(fake, fn):
+    """Run fn() with the pooled (retrying) session replaced by fake, and return it.
+
+    Only the retrying session is replaced - the probe one (retry=False) is left alone,
+    so a test that wants to check *which* session place_offer()/remove_offer() actually
+    used can tell the two apart. See with_both_sessions() for that.
+    """
+    http.reset_session(fake)
     try:
         fn()
     finally:
-        setattr(leagues.requests, method, original)
-    return recorder
+        http.reset_session()
+    return fake
+
+
+def with_both_sessions(retrying, probe, fn):
+    """Run fn() with the retrying and the probe (retry=False) sessions both replaced.
+
+    Args:
+        retrying: The fake to install as the session retry=True calls use.
+        probe: The fake to install as the session retry=False calls use.
+        fn (callable): The code under test.
+    """
+    http.reset_session(retrying, probe)
+    try:
+        fn()
+    finally:
+        http.reset_session()
 
 
 ### ===============================================================================
@@ -106,14 +143,20 @@ def with_fake(method, response, fn):
 def test_get_market_sends_a_timeout():
     """Finding 3: the confirming read-back must not be able to hang indefinitely.
 
-    place_offer() and remove_offer() already send OFFER_TIMEOUT; get_market() is what
-    app.py calls right after either of them to confirm the write, and previously had no
-    timeout at all - a hung socket there would block the response in exactly the window
-    the 502 "could not confirm" outcome exists for, after the money had already moved.
+    get_market() is what app.py calls right after place_offer()/remove_offer() to
+    confirm the write, and previously had no timeout at all - a hung socket there would
+    block the response in exactly the window the 502 "could not confirm" outcome exists
+    for, after the money had already moved.
+
+    Now goes through http.get_json() like every other read in this module, so the bound
+    is http.DEFAULT_TIMEOUT rather than a bespoke MARKET_TIMEOUT - see leagues.py for why
+    that constant was removed rather than kept alongside the shared one.
     """
-    recorder = with_fake("get", FakeResponse(200, {"it": []}), lambda:
+    fake = with_session(FakeSession(FakeResponse(200, {"it": []})), lambda:
         leagues.get_market("tok", LEAGUE_ID))
-    assert recorder.timeout, f"expected a timeout, got {recorder.timeout!r}"
+
+    assert fake.calls[0]["timeout"] == http.DEFAULT_TIMEOUT, \
+        f"expected {http.DEFAULT_TIMEOUT}, got {fake.calls[0]['timeout']}"
 
 
 ### ===============================================================================
@@ -122,21 +165,44 @@ def test_get_market_sends_a_timeout():
 
 
 def test_place_offer_posts_the_price_to_the_player():
-    recorder = with_fake("post", FakeResponse(200, {}), lambda:
+    fake = with_session(FakeSession(FakeResponse(200, {})), lambda:
         leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1180000))
 
-    assert LEAGUE_ID in recorder.url and PLAYER_ID in recorder.url, \
-        f"url should name league and player, got {recorder.url}"
-    assert recorder.json == {"price": 1180000}, f"unexpected body {recorder.json}"
-    assert recorder.headers["Cookie"] == "kkstrauth=tok;", \
-        f"expected the auth cookie, got {recorder.headers}"
+    call = fake.calls[0]
+    assert call["method"] == "POST", f"expected POST, got {call['method']}"
+    assert LEAGUE_ID in call["url"] and PLAYER_ID in call["url"], \
+        f"url should name league and player, got {call['url']}"
+    assert call["payload"] == {"price": 1180000}, f"unexpected body {call['payload']}"
+    assert call["headers"]["Cookie"] == "kkstrauth=tok;", \
+        f"expected the auth cookie, got {call['headers']}"
 
 
 def test_place_offer_sends_a_timeout():
-    """No Kickbase call in this project has one today; one hung socket parks the API."""
-    recorder = with_fake("post", FakeResponse(200, {}), lambda:
+    """Shorter than http.DEFAULT_TIMEOUT's read half: the user is waiting in front of
+    the field for this one, unlike the reads that share the longer default."""
+    fake = with_session(FakeSession(FakeResponse(200, {})), lambda:
         leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1180000))
-    assert recorder.timeout, f"expected a timeout, got {recorder.timeout!r}"
+    assert fake.calls[0]["timeout"] == leagues.OFFER_TIMEOUT, \
+        f"expected {leagues.OFFER_TIMEOUT}, got {fake.calls[0]['timeout']}"
+
+
+def test_place_offer_does_not_use_the_retrying_session():
+    """The subtlety in moving onto the shared client: retries must stay off.
+
+    POST is not in http.RETRY_METHODS, so the retrying session would not actually repeat
+    this call either way - but place_offer() has to pass retry=False regardless, since
+    depending on that asymmetry surviving is exactly the kind of thing the next person to
+    touch RETRY_METHODS would not know to check. This test would fail either way if the
+    call stopped asking for the non-retrying session.
+    """
+    retrying = FakeSession()
+    probe = FakeSession(FakeResponse(200, {}))
+
+    with_both_sessions(retrying, probe, lambda:
+        leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1180000))
+
+    assert not retrying.calls, f"expected no call on the retrying session, got {retrying.calls}"
+    assert len(probe.calls) == 1, f"expected the call on the probe session, got {probe.calls}"
 
 
 def test_place_offer_translates_a_known_error_code():
@@ -152,14 +218,15 @@ def test_place_offer_translates_a_known_error_code():
         leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1)
 
     try:
-        with_fake("post", FakeResponse(500, body), place)
-    except exceptions.KickbaseWriteException as e:
-        assert e.status == 400, f"a semantic rejection is a 400, not a 500, got {e.status}"
+        with_session(FakeSession(FakeResponse(500, body)), place)
+    except exceptions.OfferRejectedException as e:
+        assert e.status_code == 400, \
+            f"a semantic rejection is a 400, not a 500, got {e.status_code}"
         assert "Marktwert" in str(e), f"expected the German message, got: {e}"
         assert "5080" not in str(e), f"the numeric code must never reach the user, got: {e}"
         assert "UnderpayNotAllowed" not in str(e), f"expected German, got: {e}"
     else:
-        raise AssertionError("expected a KickbaseWriteException for a rejected bid")
+        raise AssertionError("expected an OfferRejectedException for a rejected bid")
 
 
 def test_place_offer_falls_back_to_errmsg_for_an_unknown_code():
@@ -170,12 +237,12 @@ def test_place_offer_falls_back_to_errmsg_for_an_unknown_code():
         leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1)
 
     try:
-        with_fake("post", FakeResponse(500, body), place)
-    except exceptions.KickbaseWriteException as e:
+        with_session(FakeSession(FakeResponse(500, body)), place)
+    except exceptions.OfferRejectedException as e:
         assert "SomethingNewWentWrong" in str(e), f"expected the errMsg fallback, got: {e}"
         assert "9999" not in str(e), f"the numeric code must never be the message, got: {e}"
     else:
-        raise AssertionError("expected a KickbaseWriteException for an unknown code")
+        raise AssertionError("expected an OfferRejectedException for an unknown code")
 
 
 def test_place_offer_forwards_a_real_outage_as_502():
@@ -184,12 +251,12 @@ def test_place_offer_forwards_a_real_outage_as_502():
         leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1)
 
     try:
-        with_fake("post", FakeResponse(500, None), place)
-    except exceptions.KickbaseWriteException as e:
-        assert e.status == 502, f"expected 502 for a codeless 5xx, got {e.status}"
+        with_session(FakeSession(FakeResponse(500, None)), place)
+    except exceptions.OfferRejectedException as e:
+        assert e.status_code == 502, f"expected 502 for a codeless 5xx, got {e.status_code}"
         assert "500" in str(e), f"message should name the upstream status, got: {e}"
     else:
-        raise AssertionError("expected a KickbaseWriteException for a 500")
+        raise AssertionError("expected an OfferRejectedException for a 500")
 
 
 def test_place_offer_passes_a_4xx_through_unchanged():
@@ -198,43 +265,23 @@ def test_place_offer_passes_a_4xx_through_unchanged():
         leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1)
 
     try:
-        with_fake("post", FakeResponse(400, {"err": 6, "errMsg": "InvalidData"}), place)
-    except exceptions.KickbaseWriteException as e:
-        assert e.status == 400, f"expected 400 passed through, got {e.status}"
+        with_session(FakeSession(FakeResponse(400, {"err": 6, "errMsg": "InvalidData"})), place)
+    except exceptions.OfferRejectedException as e:
+        assert e.status_code == 400, f"expected 400 passed through, got {e.status_code}"
     else:
-        raise AssertionError("expected a KickbaseWriteException for a 400")
+        raise AssertionError("expected an OfferRejectedException for a 400")
 
 
-def test_place_offer_reports_an_unreachable_api():
-    import requests as real_requests
+def test_place_offer_reports_a_transport_failure_as_the_clients_own_exception_type():
+    """A hung socket or a refused connection is http.request()'s job to translate, not
+    place_offer()'s own.
 
-    def place():
-        leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1180000)
-
-    try:
-        with_fake("post", real_requests.exceptions.ConnectTimeout("timed out"), place)
-    except exceptions.KickbaseWriteException as e:
-        assert e.status >= 500, f"a transport failure is not the user's fault, got {e.status}"
-    else:
-        raise AssertionError("expected a KickbaseWriteException for a connection failure")
-
-
-### The message urllib3 actually produces for a real ConnectTimeout - long, English, and
-### full of internals no user should ever see.
-REALISTIC_CONNECT_TIMEOUT = (
-    "HTTPSConnectionPool(host='api.kickbase.com', port=443): Max retries exceeded with "
-    "url: /v4/leagues/11412166/market/8289/offers (Caused by "
-    "ConnectTimeoutError(<urllib3.connection.HTTPSConnection object>, "
-    "'Connection to api.kickbase.com timed out.'))"
-)
-
-
-def test_place_offer_transport_failure_message_is_clean_german():
-    """The exception message reaches the browser, so it must read like a sentence.
-
-    A raw ConnectTimeout carries a wall of urllib3 internals in English. None of that
-    belongs in front of a user standing at the market waiting to find out why their bid
-    did not go through.
+    Before the HTTP client existed, place_offer() caught requests.exceptions.RequestException
+    itself and re-raised a bespoke German message. That duplicated exactly what
+    http.py's _request() already does for every other Kickbase call, so it is gone now:
+    the transport failure surfaces as exceptions.ApiUnreachableException, the same type
+    get_market() or any other read raises for the same cause, and app.py's generic
+    KickbaseException handler already answers it with a German message of its own.
     """
     import requests as real_requests
 
@@ -242,17 +289,13 @@ def test_place_offer_transport_failure_message_is_clean_german():
         leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1180000)
 
     try:
-        with_fake("post", real_requests.exceptions.ConnectTimeout(REALISTIC_CONNECT_TIMEOUT),
-                   place)
-    except exceptions.KickbaseWriteException as e:
-        message = str(e)
-        assert "HTTPSConnectionPool" not in message, f"leaked urllib3 detail: {message}"
-        assert "Max retries" not in message, f"leaked urllib3 detail: {message}"
-        assert "ConnectTimeoutError" not in message, f"leaked urllib3 detail: {message}"
-        assert "Kickbase" in message and "erreichbar" in message, \
-            f"expected a clean German sentence, got: {message}"
+        with_session(FakeSession(raises=real_requests.exceptions.ConnectTimeout("timed out")),
+                     place)
+    except exceptions.ApiUnreachableException as e:
+        assert issubclass(type(e), exceptions.KickbaseException), \
+            "app.py's generic handler must still catch this"
     else:
-        raise AssertionError("expected a KickbaseWriteException for a connection failure")
+        raise AssertionError("expected an ApiUnreachableException for a connection failure")
 
 
 ### ===============================================================================
@@ -267,21 +310,42 @@ def test_remove_offer_addresses_the_offer_by_user_id():
     ever hands back is the user's own id, returned by the POST as "ofi". A user holds at
     most one offer per player, so keying by user is enough.
     """
-    recorder = with_fake("delete", FakeResponse(200, {}), lambda:
+    fake = with_session(FakeSession(FakeResponse(200, {})), lambda:
         leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, OWN_USER_ID))
 
-    assert recorder.url.endswith(f"/market/{PLAYER_ID}/offers/{OWN_USER_ID}"), \
-        f"expected the offer addressed by user id, got {recorder.url}"
-    assert recorder.headers["Cookie"] == "kkstrauth=tok;"
+    call = fake.calls[0]
+    assert call["method"] == "DELETE", f"expected DELETE, got {call['method']}"
+    assert call["url"].endswith(f"/market/{PLAYER_ID}/offers/{OWN_USER_ID}"), \
+        f"expected the offer addressed by user id, got {call['url']}"
+    assert call["headers"]["Cookie"] == "kkstrauth=tok;"
 
 
 def test_remove_offer_never_calls_the_bare_collection():
     """That route answers 405, so hitting it would fail every withdrawal."""
-    recorder = with_fake("delete", FakeResponse(200, {}), lambda:
+    fake = with_session(FakeSession(FakeResponse(200, {})), lambda:
         leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, OWN_USER_ID))
 
-    assert not recorder.url.endswith("/offers"), \
-        f"the collection route takes no DELETE, got {recorder.url}"
+    assert not fake.calls[0]["url"].endswith("/offers"), \
+        f"the collection route takes no DELETE, got {fake.calls[0]['url']}"
+
+
+def test_remove_offer_does_not_use_the_retrying_session():
+    """The whole reason this migration needed a decision rather than a find-and-replace.
+
+    DELETE *is* in http.RETRY_METHODS. Without retry=False, a rejected withdrawal - also
+    reported as a 5xx, same as a rejected bid - would be retried three times by the
+    pooled client before ever reaching _offer_failure(), and would then be reported as
+    an outage instead of the rejection it actually is. This is the regression guard for
+    that: it fails if remove_offer() ever starts asking for the retrying session.
+    """
+    retrying = FakeSession()
+    probe = FakeSession(FakeResponse(200, {}))
+
+    with_both_sessions(retrying, probe, lambda:
+        leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, OWN_USER_ID))
+
+    assert not retrying.calls, f"expected no call on the retrying session, got {retrying.calls}"
+    assert len(probe.calls) == 1, f"expected the call on the probe session, got {probe.calls}"
 
 
 def test_remove_offer_surfaces_the_api_message():
@@ -289,38 +353,29 @@ def test_remove_offer_surfaces_the_api_message():
         leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, OWN_USER_ID)
 
     try:
-        with_fake("delete", FakeResponse(404, {"err": 1, "errMsg": "OfferNotFound"}), remove)
-    except exceptions.KickbaseWriteException as e:
-        assert e.status == 404, f"expected status 404, got {e.status}"
+        with_session(FakeSession(FakeResponse(404, {"err": 1, "errMsg": "OfferNotFound"})),
+                     remove)
+    except exceptions.OfferRejectedException as e:
+        assert e.status_code == 404, f"expected status 404, got {e.status_code}"
         assert "OfferNotFound" in str(e), f"expected the errMsg, got: {e}"
     else:
-        raise AssertionError("expected a KickbaseWriteException for a 404")
+        raise AssertionError("expected an OfferRejectedException for a 404")
 
 
-def test_remove_offer_reports_a_clean_german_message_on_transport_failure():
-    """remove_offer() had no transport-failure coverage at all before this test.
-
-    Same requirement as place_offer(): the message reaches the browser, so the urllib3
-    wall of English internals must not reach it either.
-    """
+def test_remove_offer_reports_a_transport_failure_as_the_clients_own_exception_type():
+    """Symmetric with place_offer(): see the matching test above for why."""
     import requests as real_requests
 
     def remove():
         leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, OWN_USER_ID)
 
     try:
-        with_fake("delete",
-                   real_requests.exceptions.ConnectTimeout(REALISTIC_CONNECT_TIMEOUT), remove)
-    except exceptions.KickbaseWriteException as e:
-        assert e.status >= 500, f"a transport failure is not the user's fault, got {e.status}"
-        message = str(e)
-        assert "HTTPSConnectionPool" not in message, f"leaked urllib3 detail: {message}"
-        assert "Max retries" not in message, f"leaked urllib3 detail: {message}"
-        assert "ConnectTimeoutError" not in message, f"leaked urllib3 detail: {message}"
-        assert "Kickbase" in message and "erreichbar" in message, \
-            f"expected a clean German sentence, got: {message}"
+        with_session(FakeSession(raises=real_requests.exceptions.ConnectTimeout("timed out")),
+                     remove)
+    except exceptions.ApiUnreachableException:
+        pass
     else:
-        raise AssertionError("expected a KickbaseWriteException for a connection failure")
+        raise AssertionError("expected an ApiUnreachableException for a connection failure")
 
 
 ### ===============================================================================
@@ -481,6 +536,46 @@ def test_patch_survives_an_unreadable_file():
         finally:
             del miscellaneous.open
             miscellaneous.DATA_DIR = original_data_dir
+
+
+def test_patch_propagates_a_write_failure_rather_than_swallowing_it():
+    """write_json_to_file() now raises on a failed write instead of logging and
+    swallowing it (see its docstring: "this used to swallow every write error and let
+    the run report success over a file that was never written").
+
+    patch_market_bid() must let that through rather than translating it into the same
+    plain False a missing file or an unmatched player id gets - those two mean "nothing
+    to patch"; this means "there was something to patch, and the write for it failed".
+    app.py's callers (place_bid()/withdraw_bid()) are what turn this into the
+    "could not confirm" response instead of an uncaught 500 - see
+    test_post_patch_failure_does_not_confirm_the_bid below for that half of the fix.
+    """
+    def raise_disk_full(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    original_write = miscellaneous.write_json_to_file
+    miscellaneous.write_json_to_file = raise_disk_full
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = path.join(tmp, "data")
+            makedirs(data_dir, exist_ok=True)
+            with open(path.join(data_dir, "market.json"), "w") as f:
+                json.dump(market_rows(), f)
+
+            original_data_dir = miscellaneous.DATA_DIR
+            miscellaneous.DATA_DIR = data_dir
+            try:
+                try:
+                    miscellaneous.patch_market_bid("8289", 1)
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError(
+                        "expected the write failure to propagate rather than return False")
+            finally:
+                miscellaneous.DATA_DIR = original_data_dir
+    finally:
+        miscellaneous.write_json_to_file = original_write
 
 
 ### ===============================================================================
@@ -677,7 +772,8 @@ def test_post_returns_the_bid_read_back_from_kickbase():
 
 def test_post_passes_the_kickbase_rejection_through():
     def rejecting(*a, **k):
-        raise exceptions.KickbaseWriteException(400, "Offer price is below the market value")
+        raise exceptions.OfferRejectedException(
+            "Offer price is below the market value", status_code=400)
 
     status, body, _ = post_bid(plain_market, 1, place=rejecting)
     assert status == 400, f"expected the API status passed through, got {status}"
@@ -733,16 +829,40 @@ def test_delete_without_a_bid_is_a_conflict():
 def test_post_read_back_failure_does_not_confirm_the_bid():
     """Finding 1: place_offer succeeds, but the read-back that follows it raises.
 
-    Reproduces the live bug: get_market() raises exceptions.NotificatonException, which
-    subclasses Exception rather than exceptions.KickbaseException, so neither endpoint's
-    handler used to catch it and Flask answered a bare 500 while the bid stood.
+    Reproduces the live bug, updated for what get_market() actually raises after the
+    merge with the shared HTTP client: exceptions.ApiUnreachableException, an
+    HttpException subclass - never exceptions.NotificatonException, which get_market()
+    has not raised since it moved onto http.get_json(). Before this fix, the handler
+    only caught NotificatonException, so this exact exception fell through to the
+    generic 502 below instead of the "could not confirm" one - the same live bug, just
+    with the exception shape the merge actually produces rather than the one the
+    original bug report happened to use.
     """
-    market = market_then(plain_market, exceptions.NotificatonException("boom"))
+    market = market_then(plain_market, exceptions.ApiUnreachableException(
+        "GET .../market timed out.", url="https://api.kickbase.com/v4/leagues/x/market"))
     status, body, own_bid_in_file = post_bid(market, 1180000)
 
     assert status == 502, f"expected 502, got {status} {body}"
     assert "Kickbase-App" in body.get("error", ""), \
         f"expected a message pointing at the Kickbase app, got {body}"
+    assert "bevor du erneut bietest" in body.get("error", ""), \
+        f"expected a warning against bidding again, got {body}"
+    assert own_bid_in_file is None, \
+        f"expected market.json left untouched, got ownBid={own_bid_in_file!r}"
+
+
+def test_post_read_back_auth_failure_also_does_not_confirm_the_bid():
+    """A different HttpException subclass than the one above - the catch in place_bid()
+    has to be exceptions.HttpException itself, not one specific descendant of it, or an
+    expired token during the read-back would fall through to the generic 502 exactly
+    the way the original NotificatonException bug did.
+    """
+    market = market_then(plain_market, exceptions.AuthExpiredException(
+        "GET .../market answered 401.", url="https://api.kickbase.com/v4/leagues/x/market",
+        status_code=401))
+    status, body, own_bid_in_file = post_bid(market, 1180000)
+
+    assert status == 502, f"expected 502, got {status} {body}"
     assert "bevor du erneut bietest" in body.get("error", ""), \
         f"expected a warning against bidding again, got {body}"
     assert own_bid_in_file is None, \
@@ -793,6 +913,90 @@ def test_delete_read_back_showing_the_offer_survived_does_not_confirm_the_withdr
         assert read_own_bid(data_dir) == 5200000, \
             f"expected market.json left untouched, got ownBid={read_own_bid(data_dir)!r}"
     finally:
+        restore(original)
+
+
+def test_delete_read_back_failure_does_not_confirm_the_withdrawal():
+    """The DELETE-side twin of test_post_read_back_failure_does_not_confirm_the_bid:
+    remove_offer() succeeds, but the read-back that follows it raises outright, rather
+    than merely showing a state that disagrees with the removal.
+    """
+    removed = []
+    market = market_then(bid_market, exceptions.ApiUnreachableException(
+        "GET .../market timed out.", url="https://api.kickbase.com/v4/leagues/x/market"))
+    client, original, data_dir = client_with(
+        market, remove=lambda *a, **k: removed.append(a),
+        market_rows=[dict(bid_row(), ownBid=5200000)])
+    try:
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid", headers=bid_headers())
+        body = response.get_json()
+
+        assert response.status_code == 502, f"expected 502, got {response.status_code} {body}"
+        assert "bevor du erneut bietest" in body.get("error", ""), \
+            f"expected a warning against bidding again, got {body}"
+        assert removed, "expected remove_offer to have been called"
+        assert read_own_bid(data_dir) == 5200000, \
+            f"expected market.json left untouched, got ownBid={read_own_bid(data_dir)!r}"
+    finally:
+        restore(original)
+
+
+### ===============================================================================
+### A confirmed write whose local cache patch then fails
+### ===============================================================================
+###
+### Distinct from the section above: here the bid or withdrawal is confirmed by the
+### read-back - Kickbase's own state is known - and only patch_market_bid()'s write to
+### market.json fails. write_json_to_file() now raises rather than logging and
+### swallowing a write failure, so without this fix the exception would propagate past
+### every handler in place_bid()/withdraw_bid() (none of them catch a bare OSError) as
+### an uncaught 500 - which the frontend renders as "Flask API not reachable" with the
+### draft still open, inviting a second bid on top of one that already landed. The fix
+### answers the same "could not confirm" outcome the section above uses, even though
+### here the write to Kickbase is not actually in doubt - only the local copy of it.
+
+
+def test_post_patch_failure_does_not_confirm_the_bid():
+    def raise_disk_full(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    original_patch = miscellaneous.patch_market_bid
+    miscellaneous.patch_market_bid = raise_disk_full
+    try:
+        status, body, own_bid_in_file = post_bid(bid_market, 1180000)
+    finally:
+        miscellaneous.patch_market_bid = original_patch
+
+    assert status == 502, f"expected 502, got {status} {body}"
+    assert "bevor du erneut bietest" in body.get("error", ""), \
+        f"expected a warning against bidding again, got {body}"
+    ### patch_market_bid() itself was replaced wholesale above, so it never touched the
+    ### faked market.json at all - own_bid_in_file staying None is that, not evidence
+    ### the real function would have left the row alone on a write failure (it cannot:
+    ### the row is patched in place before write_json_to_file() is called).
+    assert own_bid_in_file is None, f"got ownBid={own_bid_in_file!r}"
+
+
+def test_delete_patch_failure_does_not_confirm_the_withdrawal():
+    def raise_disk_full(*a, **k):
+        raise OSError(28, "No space left on device")
+
+    removed = []
+    original_patch = miscellaneous.patch_market_bid
+    miscellaneous.patch_market_bid = raise_disk_full
+    client, original, data_dir = client_with(
+        bid_market, remove=lambda *a, **k: removed.append(a),
+        market_rows=[dict(bid_row(), ownBid=5200000)])
+    try:
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid", headers=bid_headers())
+        body = response.get_json()
+
+        assert response.status_code == 502, f"expected 502, got {response.status_code} {body}"
+        assert "bevor du erneut bietest" in body.get("error", ""), \
+            f"expected a warning against bidding again, got {body}"
+        assert removed, "expected remove_offer to have been called"
+    finally:
+        miscellaneous.patch_market_bid = original_patch
         restore(original)
 
 
@@ -981,21 +1185,22 @@ if __name__ == "__main__":
     print("\nplace_offer()")
     check("posts the price to the player", test_place_offer_posts_the_price_to_the_player)
     check("sends a timeout", test_place_offer_sends_a_timeout)
+    check("does not use the retrying session", test_place_offer_does_not_use_the_retrying_session)
     check("translates a known error code", test_place_offer_translates_a_known_error_code)
     check("falls back to errMsg for an unknown code",
           test_place_offer_falls_back_to_errmsg_for_an_unknown_code)
     check("forwards a real outage as 502", test_place_offer_forwards_a_real_outage_as_502)
     check("passes a 4xx through unchanged", test_place_offer_passes_a_4xx_through_unchanged)
-    check("reports an unreachable API", test_place_offer_reports_an_unreachable_api)
-    check("transport failure message is clean German",
-          test_place_offer_transport_failure_message_is_clean_german)
+    check("reports a transport failure as the client's own exception type",
+          test_place_offer_reports_a_transport_failure_as_the_clients_own_exception_type)
 
     print("\nremove_offer()")
     check("addresses the offer by user id", test_remove_offer_addresses_the_offer_by_user_id)
     check("never calls the bare collection", test_remove_offer_never_calls_the_bare_collection)
+    check("does not use the retrying session", test_remove_offer_does_not_use_the_retrying_session)
     check("surfaces the API message", test_remove_offer_surfaces_the_api_message)
-    check("reports a clean German message on transport failure",
-          test_remove_offer_reports_a_clean_german_message_on_transport_failure)
+    check("reports a transport failure as the client's own exception type",
+          test_remove_offer_reports_a_transport_failure_as_the_clients_own_exception_type)
 
     print("\nown_offer()")
     check("reads the live offer shape", test_own_offer_reads_the_live_offer_shape)
@@ -1011,6 +1216,8 @@ if __name__ == "__main__":
     check("changes nothing for an unknown player", test_patch_of_an_unknown_player_changes_nothing)
     check("survives a missing file", test_patch_survives_a_missing_file)
     check("survives an unreadable file", test_patch_survives_an_unreadable_file)
+    check("propagates a write failure rather than swallowing it",
+          test_patch_propagates_a_write_failure_rather_than_swallowing_it)
 
     print("\nPOST /api/market/<id>/bid")
     check("rejects a non positive price", test_post_rejects_a_non_positive_price)
@@ -1028,10 +1235,20 @@ if __name__ == "__main__":
     print("\nConfirming a write")
     check("POST read-back failure does not confirm the bid",
           test_post_read_back_failure_does_not_confirm_the_bid)
+    check("POST read-back auth failure also does not confirm the bid",
+          test_post_read_back_auth_failure_also_does_not_confirm_the_bid)
     check("POST read-back with no own offer does not confirm the bid",
           test_post_read_back_with_no_own_offer_does_not_confirm_the_bid)
     check("DELETE read-back showing the offer survived does not confirm the withdrawal",
           test_delete_read_back_showing_the_offer_survived_does_not_confirm_the_withdrawal)
+    check("DELETE read-back failure does not confirm the withdrawal",
+          test_delete_read_back_failure_does_not_confirm_the_withdrawal)
+
+    print("\nA confirmed write whose local cache patch then fails")
+    check("POST patch failure does not confirm the bid",
+          test_post_patch_failure_does_not_confirm_the_bid)
+    check("DELETE patch failure does not confirm the withdrawal",
+          test_delete_patch_failure_does_not_confirm_the_withdrawal)
 
     print("\nCORS")
     check("cross-origin preflight grants no origin",

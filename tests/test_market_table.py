@@ -184,10 +184,12 @@ NO_BID = {
     "mvt": 1, "mv": 10399428, "prc": 10399428, "ofc": 0, "exs": 13315,
 }
 
-### Matthias Ginter, listed by a league member above his market value
+### Matthias Ginter, listed by a league member above his market value.
+### "dt" is the listing date. Kickbase sends it for every listing, unlike "exs".
 USER_LISTED = {
     "i": "49", "fn": "Matthias", "n": "Ginter", "tid": "5", "pos": 2, "st": 0,
-    "mvt": 1, "mv": 26260331, "prc": 32000000, "ofc": 0,
+    "mvt": 1, "mv": 26260331, "prc": 32000000, "ofc": 3,
+    "dt": "2026-08-12T09:15:00Z",
     "u": {"i": OWN_USER_ID, "n": "shirazzi", "uim": "user/91fd.jpe", "isvf": False, "st": 0},
 }
 
@@ -242,27 +244,30 @@ def test_player_statistics_asks_for_german():
     Kickbase localises it on Accept-Language alone; a "lang" or "locale" query parameter
     is ignored. Without the header the tooltip silently reverts to English.
     """
+    from backend.kickbase import http
     from backend.kickbase.v4 import leagues as leagues_v4
 
     captured = {}
 
     class FakeResponse:
+        status_code = 200
+        headers = {}
+
         def json(self):
             return {"i": "663", "stxt": "Muskuläre Probleme - verpasst nächsten beiden Testspiele"}
 
-    class FakeRequests:
+    class FakeSession:
         @staticmethod
         def get(url, headers=None, **kwargs):
             captured["headers"] = headers or {}
             return FakeResponse()
 
-    original = leagues_v4.requests
     leagues_v4.clear_caches()
     try:
-        leagues_v4.requests = FakeRequests
+        http.reset_session(FakeSession)
         leagues_v4.player_statistics("token", LEAGUE_ID, "663")
     finally:
-        leagues_v4.requests = original
+        http.reset_session()
         leagues_v4.clear_caches()
 
     language = captured["headers"].get("Accept-Language", "")
@@ -297,9 +302,11 @@ def run_market():
         makedirs(ts_dir, exist_ok=True)
 
         original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+                    miscellaneous.LAST_GOOD_DIR,
                     leagues.get_market, leagues.player_statistics, leagues.player_marketvalue)
         miscellaneous.DATA_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
+        miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
 
         try:
             leagues.get_market = lambda token, lid: [Market_Players(p) for p in market_items]
@@ -319,7 +326,8 @@ def run_market():
             with open(path.join(data_dir, "market.json")) as f:
                 rows = json.load(f)
         finally:
-            (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR, leagues.get_market,
+            (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+             miscellaneous.LAST_GOOD_DIR, leagues.get_market,
              leagues.player_statistics, leagues.player_marketvalue) = original
 
     return {row["lastName"]: row for row in rows}
@@ -402,6 +410,41 @@ def test_expiration_is_iso_for_free_agents_and_none_for_user_listings():
     expected = datetime.now(timezone.utc) + timedelta(seconds=13315)
     assert abs((parsed - expected).total_seconds()) < 60, \
         f"expected roughly {expected.isoformat()}, got {raw!r}"
+
+
+def test_every_row_carries_its_player_id():
+    """The table keyed its rows by array position, so a sale shifted every row below it."""
+    rows = run_market()
+    assert rows["Ginter"]["playerId"] == "49", f"got {rows['Ginter']}"
+    assert rows["Gouweleeuw"]["playerId"] == "1811", f"got {rows['Gouweleeuw']}"
+
+    ids = [row["playerId"] for row in rows.values()]
+    assert len(set(ids)) == len(ids), f"player ids must be unique to key rows by, got {ids}"
+
+
+def test_listed_since_survives_for_a_user_listing():
+    """The one age signal the user listings have, where the expiry column stays empty."""
+    from datetime import datetime
+
+    rows = run_market()
+    raw = rows["Ginter"]["listedSince"]
+    parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+    assert parsed.tzinfo is not None, \
+        f"listedSince needs a UTC offset, else the frontend reads it as local time: {raw!r}"
+    assert parsed.isoformat() == "2026-08-12T09:15:00+00:00", f"got {raw!r}"
+
+
+def test_a_listing_without_a_date_stays_none():
+    rows = run_market()
+    assert rows["Gouweleeuw"]["listedSince"] is None, \
+        f"the fixture carries no 'dt', got {rows['Gouweleeuw']['listedSince']!r}"
+
+
+def test_offer_count_survives():
+    rows = run_market()
+    assert rows["Ginter"]["offerCount"] == 3, f"got {rows['Ginter']['offerCount']}"
+    assert rows["Gouweleeuw"]["offerCount"] == 0, f"got {rows['Gouweleeuw']['offerCount']}"
 
 
 def test_expiration_sorts_chronologically_as_a_string():
@@ -529,6 +572,10 @@ if __name__ == "__main__":
     check("trend is gone", test_trend_is_gone)
     check("expiration is ISO for free agents, None for user listings", test_expiration_is_iso_for_free_agents_and_none_for_user_listings)
     check("expiration sorts chronologically as a string", test_expiration_sorts_chronologically_as_a_string)
+    check("every row carries its player id", test_every_row_carries_its_player_id)
+    check("listedSince survives for a user listing", test_listed_since_survives_for_a_user_listing)
+    check("a listing without a date stays None", test_a_listing_without_a_date_stays_none)
+    check("the offer count survives", test_offer_count_survives)
 
     print("\nthe fields the bid field needs")
     check("every row carries the player id", test_every_row_carries_the_player_id)

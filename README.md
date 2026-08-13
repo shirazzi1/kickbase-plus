@@ -21,6 +21,7 @@ This is a hobby project to test stuff with JSON and the cores of Python. Feel fr
 - [Docker](#docker)
   - [docker run](#docker-run)
   - [Docker Compose](#docker-compose)
+  - [Health check](#health-check)
 - [Development](#development)
 - [Planned for the future](#planned-for-the-future)
 - [Thanks to](#thanks-to)
@@ -127,6 +128,27 @@ services:
       - BID_TOKEN=<bid_token> # any long random string; container exits on startup without it
 ```  
 The backend port `5000` above is configurable via the `FLASK_PORT` environment variable and defaults to `5000` if unset. On macOS, the AirPlay Receiver occupies port `5000` by default, which stops Flask from binding to it - set `FLASK_PORT` to something else in that case.  
+
+### Health check
+The container reports its own state, so `docker ps` shows `healthy` or `unhealthy` instead
+of just `Up`. The details are at `http://<host>:<backend_port>/api/health`:
+
+| Status | Meaning | HTTP |
+|---|---|---|
+| `ok` | The last run completed and every stage succeeded. | 200 |
+| `degraded` | The last run was on time, but a stage failed. | 200 |
+| `stale` | No run for far longer than `RUN_SCHEDULE` allows. | 503 |
+| `unknown` | No run has ever completed. | 503 |
+
+A failed stage stays **200** on purpose: restarting the container would not have made
+Kickbase answer, and the affected tables are marked as out of date in the frontend's Dev
+tab anyway. Only the two cases a restart can actually fix report unhealthy.
+
+The threshold for `stale` follows `RUN_SCHEDULE`, so changing the schedule moves it along
+instead of quietly invalidating it.
+
+Discord gets one message when the runs start failing and one when they work again, plus a
+note whenever the frontend or the API had to be restarted.
 
 ---
 
