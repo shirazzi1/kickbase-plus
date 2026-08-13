@@ -193,6 +193,9 @@ def test_turnovers_cleans_pre_cutoff_events_from_the_cache():
             ### A stale cache with one pre-reset and one post-reset event
             from os import makedirs
             makedirs(ts_dir, exist_ok=True)
+            ### turnovers() resolves the feed's display names to user IDs through this file
+            with open(path.join(data_dir, "STATIC_users.json"), "w") as f:
+                json.dump({"u1": "A"}, f)
             with open(path.join(data_dir, "all_transfers.json"), "w") as f:
                 json.dump([
                     {"i": "old", "t": 15, "dt": "2026-08-01T16:43:17Z",
