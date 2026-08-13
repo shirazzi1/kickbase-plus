@@ -27,8 +27,7 @@ import {
     swingHeadline,
 } from "./swingFormulas"
 
-import { useJsonFiles } from "../hooks/useJsonData"
-import { useDataRefresh } from "../hooks/useJsonData"
+import { useDataRefresh, useJsonFiles } from "../hooks/useJsonData"
 import { dataGate } from "./DataState"
 
 // The squads to compare against the live points, and the kickoff windows the match day phase

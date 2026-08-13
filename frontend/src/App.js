@@ -17,7 +17,6 @@ import FormControlLabel from "@mui/material/FormControlLabel"
 import Grid from "@mui/material/Grid"
 import IconButton from "@mui/material/IconButton"
 import CloseIcon from "@mui/icons-material/Close"
-// import Button from "@mui/material/Button";
 
 // Import custom components from the project
 import Tagesplan from "./components/Tagesplan"

@@ -1,3 +1,6 @@
+/* eslint-disable testing-library/no-unnecessary-act -- `await act(async () => {})` is
+   how a fetch that no assertion waits for gets settled inside act(). Without it React
+   warns about the update, and the warning would hide a real one. */
 import { act } from "react"
 import { render, screen, fireEvent, waitFor } from "@testing-library/react"
 
