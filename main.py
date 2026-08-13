@@ -169,8 +169,12 @@ def main(manifest: runs.RunManifest = None) -> runs.RunManifest:
         return manifest
 
     ### Start every run with empty API caches, so a long lived process (app.py) never
-    ### serves data from a previous run
+    ### serves data from a previous run.
+    ###
+    ### Only the per-run caches. What lives under data/ - the market value curves and the
+    ### competition's team ids - is kept across runs on purpose, each on its own clock.
     leagues.clear_caches()
+    competitions.clear_caches()
 
     ### The login is not a stage. Every stage needs the token it returns, so there is
     ### nothing to isolate: without it the run has not begun.
@@ -461,6 +465,15 @@ def taken_free_players(user_token: str, selected_league: object):
     ### Get all transfers in the league
     all_transfers = leagues.transfers(user_token, selected_league.id)
 
+    ### Everything from before the season start or league reset belongs to a previous season,
+    ### and a buy price from back then is not this season's buy price - the player was
+    ### reassigned at the reset, which is what the START_DATE market value below stands for.
+    ### balances() and turnovers() have always cut here; this function relied on the feed
+    ### still carrying the pre-reset items, and since the feed walk now stops at the newest
+    ### recorded transfer, that is no longer something to rely on either way.
+    all_transfers = miscellaneous.filter_transfers_from(
+        all_transfers, miscellaneous.get_start_datetime())
+
     ### Built once, not once per transfer: the old code rebuilt this reverse mapping inside
     ### the loop below, and a name it could not resolve landed under the key None, where no
     ### owner ever matches it. The buy price then silently fell back to the season start
@@ -581,21 +594,10 @@ def turnovers(user_token: str, selected_league: object) -> None:
 
     final_turnovers = []
 
-    ### Load existing transfers from all_transfers.json which were saved in earlier runs
-    all_transfers_path = path.join(DATA_DIR, "all_transfers.json")
-
-    all_transfers = [] # Initialize as empty list first
-
-    ### Check if all_transfers.json exists and load it
-    if path.exists(all_transfers_path):
-        try:
-            with open(all_transfers_path, "r") as f:
-                all_transfers = json.load(f)
-            logging.debug(f"Loaded {len(all_transfers)} existing transfers from all_transfers.json")
-        except json.JSONDecodeError:
-            logging.warning(f"The file {all_transfers_path} is empty or contains invalid JSON. Initializing all_transfers as an empty list.")
-    else:
-        logging.debug(f"The file {all_transfers_path} does not exist. Initializing all_transfers as an empty list.")
+    ### Load existing transfers from all_transfers.json which were saved in earlier runs.
+    ### The same list is the watermark the feed walk in leagues.transfers() stops at, which
+    ### is why loading it lives in one place now.
+    all_transfers = miscellaneous.load_known_transfers()
 
     ### Get new transfers from the API
     new_transfers = leagues.transfers(user_token, selected_league.id)
@@ -627,7 +629,7 @@ def turnovers(user_token: str, selected_league: object) -> None:
     ### Save updated transfers back to all_transfers.json.
     ### The cache stays the raw record of what the API said. Reverted bookings are
     ### dropped below, for the calculation only, so a later correction can still be seen.
-    miscellaneous.write_json_to_file(all_transfers, "all_transfers.json")
+    miscellaneous.write_json_to_file(all_transfers, miscellaneous.ALL_TRANSFERS_FILE)
     logging.debug("Updated all_transfers.json with new transfers")
 
     ### A booking an admin reverted stays in the feed, and an unpaired leftover sale would

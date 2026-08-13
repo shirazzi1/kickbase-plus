@@ -128,9 +128,11 @@ def test_transfers_pages_the_feed_once_per_league():
 
     fake.get = paged_get
 
-    first = leagues.transfers("token", "league1")
+    ### An explicit empty watermark, so this test is about the per-run cache and not about
+    ### whatever all_transfers.json happens to hold - see tests/test_feed_watermark.py
+    first = leagues.transfers("token", "league1", known_transfers=[])
     calls_after_first = len(fake.urls)
-    second = leagues.transfers("token", "league1")
+    second = leagues.transfers("token", "league1", known_transfers=[])
 
     assert len(fake.urls) == calls_after_first, \
         f"second call re-paged the feed: {calls_after_first} -> {len(fake.urls)} HTTP calls"

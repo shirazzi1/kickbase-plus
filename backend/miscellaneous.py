@@ -442,6 +442,50 @@ def filter_transfers_from(transfers: list, cutoff: datetime) -> list:
     return [item for item in transfers if parse_feed_timestamp(item["dt"]) >= cutoff]
 
 
+### The file the activity feed transfers accumulate in. It is the record of every transfer
+### this project has ever seen, and therefore also the watermark the feed walk stops at.
+ALL_TRANSFERS_FILE = "all_transfers.json"
+
+
+def load_known_transfers() -> list:
+    """### The transfers earlier runs already recorded.
+
+    Two callers, for two reasons. turnovers() merges the new transfers into this list and
+    writes it back, and the feed walk in leagues.transfers() stops as soon as it reaches one
+    of these - there is nothing older that this file does not already hold.
+
+    A missing or unreadable file is an empty list, not an error. That is the state of a
+    fresh container, and it means "walk the whole feed", which is what every run did before
+    the watermark existed.
+
+    Returns:
+        list: The recorded activity feed items, oldest first as they were written.
+    """
+    file_path = path.join(DATA_DIR, ALL_TRANSFERS_FILE)
+
+    if not path.exists(file_path):
+        logging.debug(f"{file_path} does not exist yet, so there is no transfer history to "
+                      "build on.")
+        return []
+
+    try:
+        with open(file_path, "r") as f:
+            transfers = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning(f"{file_path} could not be read ({type(e).__name__}: {e}). Carrying "
+                        "on without it, which means the whole activity feed is walked again.")
+        return []
+
+    if not isinstance(transfers, list):
+        logging.warning(f"{file_path} does not hold a list. Carrying on without it, which "
+                        "means the whole activity feed is walked again.")
+        return []
+
+    logging.debug(f"Loaded {len(transfers)} existing transfers from {ALL_TRANSFERS_FILE}")
+
+    return transfers
+
+
 ### Sentinel for "nobody has bought this player yet", which is not the same as "free".
 ### A manager selling a player nobody ever bought had them assigned at the season start.
 _UNCLAIMED = object()
