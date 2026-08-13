@@ -555,6 +555,14 @@ def taken_free_players(user_token: str, selected_league: object):
                     "lastName": player["n"],
                     "buyPrice": buy_price,
                     "marketValue": player["mv"],
+                    ### Saison-Gesamtpunkte aus derselben player_statistics()-Response, die oben
+                    ### schon für den Besitzer gelesen wird — also ohne einen einzigen zusätzlichen
+                    ### Request. taken_players wird historisiert (backend/miscellaneous.py), deshalb
+                    ### ergibt die Differenz zweier aufeinanderfolgender Snapshots die Punkte eines
+                    ### Spieltags pro Spieler. Die freien Spieler unten führen dasselbe "tp" unter
+                    ### dem älteren Namen "points"; der wird hier bewusst nicht angefasst, weil das
+                    ### Frontend darauf liest.
+                    "totalPoints": player_stats.get("tp", 0),
                     "status": player["st"],
                     "trend": player["mvt"],
                 })
