@@ -281,9 +281,9 @@ setting `ownBid` and writing it back through `write_json_to_file()`. An unknown
 
 Two costs are accepted rather than solved here:
 
-- **The patch can race a concurrent `main.py` write.** Non-atomic JSON writes are an
-  open item in `docs/improvement-plan-2026-08-12.md` (cluster B) affecting every write in
-  the project; the next scrape repairs the row either way.
+- **The patch can race a concurrent `main.py` write.** Every JSON write in this project is
+  a plain read-modify-write with no locking, so this is not a new risk, just a new writer
+  exposed to an existing one; the next scrape repairs the row either way.
 - **Every bid costs a fresh login.** `app.py` already logs in per request. Token caching
   is likewise its own item in that plan.
 
@@ -378,7 +378,7 @@ following `tests/test_start_date.py`.
 ## Out of scope
 
 Accepting or declining offers on your own listings, listing a player, and any other
-write action. Atomic JSON writes and auth token caching, both already tracked in
-`docs/improvement-plan-2026-08-12.md`. Runtime JSON fetching to replace the build-time
-imports — the largest item in that plan, and the reason a confirmed bid needs a local
-override at all.
+write action. Making the JSON writes atomic and caching the auth token instead of logging
+in per request — both pre-existing gaps in this project, not introduced here. Runtime
+JSON fetching to replace the build-time imports — the biggest lever for closing that gap,
+and the reason a confirmed bid needs a local override at all.

@@ -906,10 +906,10 @@ def patch_market_bid(player_id: str, own_bid) -> bool:
     invisible until the next scrape. Patching the row bridges that gap, and survives a
     page reload the way a value held only in React state would not.
 
-    This can race a main.py run writing the same file. The writes in this project are
-    not atomic - an open item in docs/improvement-plan-2026-08-12.md, cluster B - and
-    the next scrape repairs the row either way, so the race is accepted rather than
-    solved here.
+    This can race a main.py run writing the same file. The writes in this project are a
+    plain read-modify-write with no locking, so a concurrent main.py run could overwrite
+    this patch or vice versa; the next scrape repairs the row either way, so the race is
+    accepted rather than solved here.
 
     Args:
         player_id (str): The player whose row is patched.
