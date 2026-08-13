@@ -1,9 +1,8 @@
 import Tooltip from "@mui/material/Tooltip"
-import Typography from "@mui/material/Typography"
 import { Box, alpha, useTheme } from "@mui/material"
 import PagedDataGrid from "./PagedDataGrid"
+import BidCell from "./BidCell"
 import {
-    currencyFormatter,
     percentFormatter,
     currencyOrDash,
     percentOrDash,
@@ -165,27 +164,14 @@ function MarketTable() {
             headerAlign: "center",
             align: "right",
             cellClassName: "font-tabular-nums",
-            renderCell: (params) => {
-                if (params.value === null || params.value === undefined)
-                    return ""
-
-                // How far the bid sits above (or below) the current market value
-                const marketValue = params.row.marketValue
-                const surcharge = marketValue
-                    ? percentFormatter.format(params.value / marketValue - 1)
-                    : null
-
-                return (
-                    <span>
-                        {currencyFormatter.format(Number(params.value))}
-                        {surcharge && (
-                            <Typography component="span" variant="body2" sx={{ opacity: 0.6, marginLeft: "6px" }}>
-                                ({surcharge})
-                            </Typography>
-                        )}
-                    </span>
-                )
-            }
+            renderCell: (params) => (
+                <BidCell
+                    row={params.row}
+                    growthDays={config.bepGrowthDays}
+                    targetDays={config.bepTargetDays}
+                    onEdit={() => {}}
+                />
+            )
         },
         ...changeColumns("today", "Heute", 110),
         ...changeColumns("yesterday", "Gestern", 110),
