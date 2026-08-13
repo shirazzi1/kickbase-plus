@@ -24,10 +24,21 @@ import {
     forcedSaleRisk
 } from "./marketFormulas"
 import ManagerStacks, { ESTIMATE_NOTE } from "./ManagerStacks"
+import { bidderChipLabel, likelyBidders, loadManagerProfiles, managerProfileList } from "./managerProfiles"
 
 // Import data
 import data from "../data/market.json"
 import balances from "../data/balances.json"
+
+// The manager fingerprints behind the "Wahrscheinliche Mitbieter" column. Null until a
+// scrape has written manager_profiles.json, and the column is then left out entirely rather
+// than shown empty - an empty cell there would claim nobody wants the player.
+//
+// A document with no managers in it counts as no document, the same way the dossier tab
+// reads it: the backend writes an entry per league member, so an empty one is a file that
+// cannot answer anything rather than a league that has not traded.
+const profiles = loadManagerProfiles()
+const hasProfiles = managerProfileList(profiles).length > 0
 
 const daysFormatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 })
 
@@ -361,6 +372,48 @@ function MarketTable() {
                 )
             }
         },
+        // Only when there are fingerprints to match against. Without them the column would
+        // be a row of dashes that reads as "nobody is interested in these players".
+        ...(hasProfiles ? [{
+            field: "likelyBidders",
+            headerName: "Wahrscheinliche Mitbieter",
+            type: "number",
+            width: 230,
+            headerAlign: "center",
+            align: "center",
+            description: "Die Manager, die den Preis zahlen könnten und deren bisherige Käufe zu "
+                + "diesem Spieler passen: sie kaufen öfter bei seinem Klub, oder sie kaufen "
+                + "überwiegend in steigende Marktwerte und dieser steigt gerade. Beobachtetes "
+                + "Verhalten, keine Gebote - Kickbase zeigt nie, wer bietet. " + SOLVER_NOTE,
+            renderCell: (params) => {
+                const bidders = params.row.likelyBidderDetail
+
+                // No match is not the same as no data, and neither is worth a chip: the
+                // 'Verdeckte Bieter' column next door already says who could pay.
+                if (bidders.length === 0)
+                    return <span style={{ opacity: 0.4 }}>–</span>
+
+                const lead = params.row.solved.isOwnListing
+                    ? "Passt zum Beuteschema möglicher Käufer: "
+                    : "Passt zum Beuteschema von: "
+
+                const why = bidders
+                    .map((bidder) => `${bidder.username} (${bidder.reasons.map((reason) => reason.text).join("; ")})`)
+                    .join(" — ")
+
+                return (
+                    <Tooltip title={`${lead}${why}. ${ESTIMATE_NOTE}`} arrow>
+                        <Chip
+                            label={bidderChipLabel(bidders)}
+                            size="small"
+                            color="info"
+                            variant="outlined"
+                        />
+                    </Tooltip>
+                )
+            },
+            sortComparator: missingSortsLast
+        }] : []),
         {
             field: "seller",
             headerName: "Verkäufer",
@@ -464,6 +517,11 @@ function MarketTable() {
         const solved = minWinningBid(row, balances, me?.userId)
         const distressDetail = forcedSaleRisk(row, balances, now)
 
+        // Which of the affordable managers buy players like this one. The affordable set is
+        // the solver's own (affordableRivals, via minWinningBid), so the budget half of the
+        // heuristic is derived once per listing rather than twice.
+        const likelyBidderDetail = likelyBidders(row, profiles, { rivals: solved.rivals })
+
         return {
             // The player, not their position in the file. Keyed by index, every sale
             // shifted the rows below it onto a different player, which took the selection
@@ -504,6 +562,8 @@ function MarketTable() {
             solved,
             minBid: solved.bid,
             hiddenBidders: solved.rivals.length,
+            likelyBidderDetail,
+            likelyBidders: likelyBidderDetail.length,
             distressDetail,
             distress: distressDetail.score,
             expiration,

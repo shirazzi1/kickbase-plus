@@ -186,4 +186,14 @@ describe("MarketTable", () => {
         // isSelf is in the fixture, so the transition warning must stay away
         expect(screen.queryByText(/kein Manager als/)).toBeNull()
     })
+
+    it("leaves the bidder column out while there are no profiles", () => {
+        // manager_profiles.json is written by the last stage of a scrape run and does not
+        // exist on a fresh deployment. A column of dashes would read as "nobody wants any of
+        // these players", so there is no column at all - and above all no broken table.
+        render(<MarketTable />)
+
+        expect(screen.queryByText("Wahrscheinliche Mitbieter")).toBeNull()
+        expect(screen.getByText("Matthias Ginter")).toBeTruthy()
+    })
 })
