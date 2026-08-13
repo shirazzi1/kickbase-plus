@@ -1178,6 +1178,95 @@ def test_wrong_token_is_401_while_unset_is_503():
 
 ### ===============================================================================
 
+def test_post_reports_a_transport_failure_on_the_write_as_unconfirmed():
+    """A timeout on place_offer() itself cannot tell us whether the bid was recorded.
+
+    ApiUnreachableException covers a refused connection (never arrived) and a read
+    timeout (may have arrived, answer lost) alike, and the client does not distinguish
+    them. Before this, the failure fell to the generic handler claiming "Kickbase konnte
+    das Gebot nicht verarbeiten" - an assertion we cannot make, and one that invites a
+    second bid on a bid that may be standing.
+    """
+    def unreachable(*a, **k):
+        raise exceptions.ApiUnreachableException(
+            "POST .../offers timed out.",
+            url="https://api.kickbase.com/v4/leagues/x/market/1/offers")
+
+    status, body, own_bid_in_file = post_bid(plain_market, 1180000, place=unreachable)
+
+    assert status == 502, f"expected 502, got {status} {body}"
+    assert "bevor du erneut bietest" in body.get("error", ""), \
+        f"expected the unconfirmed warning, got {body}"
+    assert "nicht verarbeiten" not in body.get("error", ""), \
+        f"must not claim the bid failed, got {body}"
+    assert own_bid_in_file is None, \
+        f"expected market.json left untouched, got ownBid={own_bid_in_file!r}"
+
+
+def test_delete_reports_a_transport_failure_on_the_write_as_unconfirmed():
+    """The same for remove_offer(): the withdrawal may have been applied regardless."""
+    def unreachable(*a, **k):
+        raise exceptions.ApiUnreachableException(
+            "DELETE .../offers timed out.",
+            url="https://api.kickbase.com/v4/leagues/x/market/1/offers/2")
+
+    ### The pre-check has to see the offer, or the endpoint 409s before remove_offer runs
+    client, original, data_dir = client_with(
+        market_then(bid_market, bid_market), remove=unreachable,
+        market_rows=[dict(bid_row(), ownBid=5200000)])
+    try:
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid", headers=bid_headers())
+        body = response.get_json()
+        assert response.status_code == 502, f"expected 502, got {response.status_code} {body}"
+        assert "bevor du erneut bietest" in body.get("error", ""), \
+            f"expected the unconfirmed warning, got {body}"
+        ### The standing bid must survive: claiming it is gone is the wrong guess here
+        assert read_own_bid(data_dir) == 5200000, \
+            f"expected market.json left untouched, got {read_own_bid(data_dir)!r}"
+    finally:
+        restore(original)
+
+
+def test_a_rejected_bid_is_not_reported_as_unconfirmed():
+    """The ordering guard for the narrow catch above.
+
+    OfferRejectedException is an HttpException too. Catching HttpException around the
+    write instead of ApiUnreachableException would swallow a refusal Kickbase stated
+    plainly and answer "we could not confirm" - throwing away both the normalised status
+    and the German message _offer_failure() built from errMsg.
+    """
+    def rejecting(*a, **k):
+        raise exceptions.OfferRejectedException(
+            "Das Gebot liegt unter dem Marktwert.", status_code=400)
+
+    status, body, _ = post_bid(plain_market, 1, place=rejecting)
+
+    assert status == 400, f"expected the normalised 400, not an unconfirmed 502, got {status}"
+    assert "Marktwert" in body.get("error", ""), \
+        f"expected the rejection message, got {body}"
+    assert "bevor du erneut bietest" not in body.get("error", ""), \
+        f"a stated refusal is not unconfirmed, got {body}"
+
+
+def test_a_transport_failure_before_the_write_is_not_reported_as_unconfirmed():
+    """Nothing was sent yet, so "your bid may be standing" would be a false alarm.
+
+    Pins the new catch to the write call only: it must not widen to cover the pre-write
+    listing check.
+    """
+    market = market_then(
+        exceptions.ApiUnreachableException(
+            "GET .../market timed out.", url="https://api.kickbase.com/v4/leagues/x/market"),
+        plain_market)
+    status, body, own_bid_in_file = post_bid(market, 1180000)
+
+    assert status == 502, f"expected 502, got {status} {body}"
+    assert "bevor du erneut bietest" not in body.get("error", ""), \
+        f"nothing was sent, so this must not warn about a standing bid: {body}"
+    assert own_bid_in_file is None, \
+        f"expected market.json left untouched, got ownBid={own_bid_in_file!r}"
+
+
 if __name__ == "__main__":
     print("get_market()")
     check("sends a timeout", test_get_market_sends_a_timeout)
@@ -1269,6 +1358,14 @@ if __name__ == "__main__":
           test_post_with_a_non_ascii_header_against_an_ascii_token_is_unauthorized)
     check("wrong token is 401 while unset is 503",
           test_wrong_token_is_401_while_unset_is_503)
+    check("a transport failure on the POST write is unconfirmed",
+          test_post_reports_a_transport_failure_on_the_write_as_unconfirmed)
+    check("a transport failure on the DELETE write is unconfirmed",
+          test_delete_reports_a_transport_failure_on_the_write_as_unconfirmed)
+    check("a rejected bid is not reported as unconfirmed",
+          test_a_rejected_bid_is_not_reported_as_unconfirmed)
+    check("a transport failure before the write is not unconfirmed",
+          test_a_transport_failure_before_the_write_is_not_reported_as_unconfirmed)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")

@@ -226,7 +226,22 @@ def place_bid(player_id):
         if listing.userId is not None and str(listing.userId) == str(user_info.id):
             return jsonify({"error": "Auf ein eigenes Angebot kannst du nicht bieten."}), 409
 
-        leagues.place_offer(user_token, selected_league.id, player_id, price)
+        ### A transport failure on the write itself cannot tell us whether Kickbase
+        ### recorded the bid: ApiUnreachableException covers a refused connection or a DNS
+        ### failure (the request never arrived) and a read timeout (it may have arrived and
+        ### the answer was lost) alike, and the client does not distinguish them. Reporting
+        ### it as a failure would invite a second bid on one that may be standing, so this
+        ### joins the unconfirmed outcome. The two mistakes do not cost the same: being
+        ### over-cautious costs a glance at the app, being under-cautious costs a bid.
+        ###
+        ### Caught narrowly rather than as HttpException, because OfferRejectedException is
+        ### an HttpException too - a rejected bid has to keep the normalised status and the
+        ### German message _offer_failure() built for it, and must not be reported as
+        ### unconfirmed when Kickbase told us plainly that it refused.
+        try:
+            leagues.place_offer(user_token, selected_league.id, player_id, price)
+        except exceptions.ApiUnreachableException:
+            return _unconfirmed(f"the bid on player {player_id}")
 
         ### Read back what Kickbase recorded, rather than trusting what we sent. Kickbase
         ### already accepted the write above, so a read-back that raises, or one that
@@ -304,8 +319,15 @@ def withdraw_bid(player_id):
         if listing.own_offer(user_info.id) is None:
             return jsonify({"error": "Auf diesen Spieler hast du kein Gebot abgegeben."}), 409
 
-        ### The user's own id is the offer's identifier - Kickbase exposes no offer id
-        leagues.remove_offer(user_token, selected_league.id, player_id, user_info.id)
+        ### The user's own id is the offer's identifier - Kickbase exposes no offer id.
+        ### A transport failure here is unconfirmed for the same reason as in place_bid():
+        ### the withdrawal may have been processed with the answer lost on the way back,
+        ### and "it did not work" would send the user off believing a bid still stands that
+        ### may already be gone - or the reverse. Narrow catch for the same reason too.
+        try:
+            leagues.remove_offer(user_token, selected_league.id, player_id, user_info.id)
+        except exceptions.ApiUnreachableException:
+            return _unconfirmed(f"the withdrawal on player {player_id}")
 
         ### Symmetric with the POST above: read back to confirm the offer is actually
         ### gone rather than trusting the 200. An idempotent 200, or the seller accepting
