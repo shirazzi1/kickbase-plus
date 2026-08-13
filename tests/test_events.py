@@ -386,6 +386,10 @@ def test_cash_hoarding():
         assert event["managerId"] == "u1", event
         assert event["severity"] == events.SEVERITY_WATCH, event
         assert "+3,00 Mio. €" in event["text"], event
+        ### The span the snapshots actually cover, not the width of the window. On a young
+        ### store three snapshots are eight hours apart, and claiming 48 would be claiming an
+        ### observation that never happened.
+        assert "kein Kauf in den letzten 8 Std." in event["text"], event
 
 
 def test_cash_hoarding_needs_no_purchase():
@@ -477,6 +481,47 @@ def test_a_failed_push_is_not_remembered():
             miscellaneous.discord_notification = original
 
         assert len(attempts) == 2, attempts
+
+
+def test_a_flood_is_capped_and_drained_oldest_first():
+    """A busy window fills more than one message, and nothing falls out in between.
+
+    The cap exists because the embed has a length limit and forty lines are not read on a
+    phone. What must not happen is that the events beyond the cap are quietly dropped: they
+    stay unannounced, and the next run takes them.
+    """
+    with TempStore():
+        ### Twelve urgent events, newest first, the order build_events() hands them over in
+        built = [{
+            "key": f"neue_listung|{index}|x", "type": "neue_listung",
+            "severity": events.SEVERITY_ACT,
+            "ts": hours_ago(index).isoformat(), "playerId": str(index), "managerId": None,
+            "text": f"Ereignis {index:02d}",
+        } for index in range(12)]
+
+        messages = []
+        original = miscellaneous.discord_notification
+        miscellaneous.discord_notification = lambda title, message, colour, url: messages.append(message)
+
+        try:
+            assert events.push_events(built, "https://example.invalid/hook", NOW) == events.MAX_DISCORD_EVENTS
+            assert events.push_events(built, "https://example.invalid/hook", NOW) == 2
+        finally:
+            miscellaneous.discord_notification = original
+
+        assert len(messages) == 2, messages
+
+        ### Oldest first, so a message reads as a timeline: event 11 is the oldest of twelve
+        assert "Ereignis 11" in messages[0], messages[0]
+        assert "Ereignis 02" in messages[0], messages[0]
+        assert "Ereignis 01" not in messages[0], messages[0]
+        assert "und 2 weitere Ereignisse" in messages[0], messages[0]
+
+        ### The overflow, and only the overflow, in the next run
+        assert "Ereignis 01" in messages[1], messages[1]
+        assert "Ereignis 00" in messages[1], messages[1]
+        assert "Ereignis 02" not in messages[1], messages[1]
+        assert "weitere Ereignisse" not in messages[1], messages[1]
 
 
 def test_only_severe_events_are_pushed():
@@ -632,6 +677,7 @@ if __name__ == "__main__":
     print("\nDedupe:")
     check("the same event is announced once", test_the_same_event_is_announced_once)
     check("a failed push is not remembered", test_a_failed_push_is_not_remembered)
+    check("a flood is capped and drained oldest first", test_a_flood_is_capped_and_drained_oldest_first)
     check("only severe events are pushed", test_only_severe_events_are_pushed)
     check("the threshold comes from the environment", test_the_severity_threshold_comes_from_the_environment)
 

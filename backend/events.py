@@ -813,6 +813,13 @@ def cash_hoarding_events(snapshots: list, transfers, window_start: datetime) -> 
     events = []
     moment = in_window[-1]["ts"]
 
+    ### What was actually watched, which is not EVENT_WINDOW_HOURS. The snapshots reach back
+    ### as far as the store does, and on a young store three snapshots span eight hours, not
+    ### forty-eight. The sentence says the observed span, because the reader's next move -
+    ### bidding against someone who is supposedly sitting on cash - depends on how long the
+    ### quiet has really lasted.
+    observed = moment - in_window[0]["ts"]
+
     for manager_id, series in balances_by_manager.items():
         if len(series) < CASH_HOARD_MIN_SNAPSHOTS or manager_id in buyers:
             continue
@@ -834,7 +841,7 @@ def cash_hoarding_events(snapshots: list, transfers, window_start: datetime) -> 
             SEVERITY_WATCH,
             moment,
             f"{names[manager_id]} hortet Geld: {format_delta(growth)} über "
-            f"{len(series)} Snapshots, kein Kauf in {EVENT_WINDOW_HOURS} Std.",
+            f"{len(series)} Snapshots, kein Kauf in {_format_span(observed)}.",
             key=f"cash_hortung|{manager_id}|{moment.date().isoformat()}",
             manager_id=manager_id,
         ))
@@ -929,6 +936,20 @@ def _format_remaining(remaining: timedelta) -> str:
     return f"in {hours} Std." if hours >= 1 else "in unter 1 Std."
 
 
+def _format_span(span: timedelta) -> str:
+    """### How long a stretch of snapshots covered, in German.
+
+    Args:
+        span (timedelta): The time between the first and the last snapshot.
+
+    Returns:
+        str: e.g. "den letzten 8 Std." or "unter 1 Std.".
+    """
+    hours = int(span.total_seconds() // 3600)
+
+    return f"den letzten {hours} Std." if hours >= 1 else "unter 1 Std."
+
+
 def _format_offers(offers) -> str:
     """### How many managers are bidding, in German.
 
@@ -1016,12 +1037,19 @@ def _finalise(events: list, window_start: datetime) -> list:
 def _read_transfers():
     """### Read all_transfers.json, the record of who bought what.
 
+    Deliberately not miscellaneous.load_known_transfers(), which reads the same file. That
+    one answers "what do we already have", so a missing file is legitimately an empty list -
+    it means "walk the whole feed". Here the same empty list would mean "nobody bought
+    anything", and every manager whose budget grew would be accused of hoarding on the
+    strength of a file that was never read. The two callers need different answers to the
+    same failure, so this one keeps None.
+
     Returns:
         list: The transfers, or None if the file is missing or unreadable. None is not an
             empty list: an empty list says nobody bought anything, and the difference decides
             whether a cash_hortung event may be claimed at all.
     """
-    file_path = path.join(DATA_DIR, "all_transfers.json")
+    file_path = path.join(DATA_DIR, miscellaneous.ALL_TRANSFERS_FILE)
 
     try:
         with open(file_path, "r") as f:
@@ -1089,6 +1117,10 @@ def save_reported(reported: dict, now: datetime = None) -> None:
         if moment is None or moment >= cutoff:
             pruned[key] = stamp
 
+    temp_path = None
+
+    ### Broad, and it must be: this runs after the message has already gone out. Anything
+    ### raised here would fail a stage over bookkeeping for work that succeeded.
     try:
         makedirs(path.dirname(EVENTS_STATE_PATH), exist_ok=True)
 
@@ -1101,7 +1133,14 @@ def save_reported(reported: dict, now: datetime = None) -> None:
             os.fsync(f.fileno())
 
         os.replace(temp_path, EVENTS_STATE_PATH)
-    except OSError as e:
+    except Exception as e:
+        ### The same cleanup write_json_to_file() does, for the same reason: a full disk
+        ### fails between mkstemp() and os.replace(), and without this the abandoned
+        ### .events-state.*.tmp stays behind - six a day, in the directory that is mounted
+        ### precisely because it has to survive.
+        if temp_path is not None:
+            miscellaneous._remove_quietly(temp_path)
+
         logging.warning(
             f"Could not write {EVENTS_STATE_PATH} ({type(e).__name__}: {e}). The events "
             "announced this run may be announced again next run."
