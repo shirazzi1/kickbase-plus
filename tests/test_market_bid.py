@@ -444,6 +444,19 @@ def bid_row():
     return {"playerId": PLAYER_ID, "lastName": "Musah", "ownBid": None, "marketValue": 5000000}
 
 
+def bid_headers():
+    """The X-Bid-Token header that matches the token app.py currently holds.
+
+    Read fresh on every call, rather than cached into a module constant, so the
+    fail-closed test below (which monkeypatches flask_app.bid_token to None) is not
+    fighting a stale value captured at import time. Every test that exercises the
+    endpoints' existing behaviour (not the token check itself) sends this, so the token
+    check passes through to whatever was already being tested.
+    """
+    import app as flask_app
+    return {"X-Bid-Token": flask_app.bid_token}
+
+
 def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID, market_rows=None):
     """A Flask test client with login, market, the write calls and market.json faked out.
 
@@ -518,7 +531,8 @@ def post_bid(market, price, place=None):
     """
     client, original, data_dir = client_with(market, place=place)
     try:
-        response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": price})
+        response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": price},
+                                headers=bid_headers())
         return response.status_code, response.get_json(), read_own_bid(data_dir)
     finally:
         restore(original)
@@ -547,7 +561,8 @@ def test_post_rejects_a_non_integer_price():
 def test_post_rejects_a_player_not_on_the_market():
     client, original, _ = client_with(plain_market)
     try:
-        response = client.post("/api/market/999999/bid", json={"price": 1180000})
+        response = client.post("/api/market/999999/bid", json={"price": 1180000},
+                                headers=bid_headers())
         assert response.status_code == 404, \
             f"expected 404, got {response.status_code} {response.get_json()}"
     finally:
@@ -594,7 +609,7 @@ def test_delete_withdraws_and_reports_no_bid():
         bid_market, remove=lambda *a, **k: removed.append(a),
         market_rows=[dict(bid_row(), ownBid=5200000)])
     try:
-        response = client.delete(f"/api/market/{PLAYER_ID}/bid")
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid", headers=bid_headers())
         assert response.status_code == 200, \
             f"expected 200, got {response.status_code} {response.get_json()}"
         assert response.get_json() == {"ownBid": None}, \
@@ -609,7 +624,7 @@ def test_delete_withdraws_and_reports_no_bid():
 def test_delete_without_a_bid_is_a_conflict():
     client, original, _ = client_with(plain_market)
     try:
-        response = client.delete(f"/api/market/{PLAYER_ID}/bid")
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid", headers=bid_headers())
         assert response.status_code == 409, \
             f"expected 409, got {response.status_code} {response.get_json()}"
     finally:
@@ -637,6 +652,76 @@ def test_cross_origin_preflight_grants_no_origin():
     allowed_origin = response.headers.get("Access-Control-Allow-Origin")
     assert allowed_origin is None, \
         f"expected no Access-Control-Allow-Origin header, got {allowed_origin!r}"
+
+
+### ===============================================================================
+### X-Bid-Token
+### ===============================================================================
+
+
+def test_post_without_a_token_is_unauthorized():
+    client, original, _ = client_with(plain_market)
+    try:
+        response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000})
+        assert response.status_code == 401, \
+            f"expected 401, got {response.status_code} {response.get_json()}"
+    finally:
+        restore(original)
+
+
+def test_post_with_the_wrong_token_is_unauthorized():
+    client, original, _ = client_with(plain_market)
+    try:
+        response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
+                                headers={"X-Bid-Token": "definitely-wrong"})
+        assert response.status_code == 401, \
+            f"expected 401, got {response.status_code} {response.get_json()}"
+    finally:
+        restore(original)
+
+
+def test_delete_without_a_token_is_unauthorized():
+    client, original, _ = client_with(
+        bid_market, market_rows=[dict(bid_row(), ownBid=5200000)])
+    try:
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid")
+        assert response.status_code == 401, \
+            f"expected 401, got {response.status_code} {response.get_json()}"
+    finally:
+        restore(original)
+
+
+def test_delete_with_the_wrong_token_is_unauthorized():
+    client, original, _ = client_with(
+        bid_market, market_rows=[dict(bid_row(), ownBid=5200000)])
+    try:
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid",
+                                  headers={"X-Bid-Token": "definitely-wrong"})
+        assert response.status_code == 401, \
+            f"expected 401, got {response.status_code} {response.get_json()}"
+    finally:
+        restore(original)
+
+
+def test_bid_token_unset_refuses_every_request_even_with_a_token():
+    """Fail closed: an unset BID_TOKEN blocks every request rather than skipping the check.
+
+    Otherwise unsetting the env var (e.g. a misconfigured deploy) would silently turn
+    the check off instead of tightening it.
+    """
+    import app as flask_app
+
+    client, original, _ = client_with(plain_market)
+    previous_token = flask_app.bid_token
+    flask_app.bid_token = None
+    try:
+        response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
+                                headers={"X-Bid-Token": "any-token-at-all"})
+        assert response.status_code == 401, \
+            f"expected 401, got {response.status_code} {response.get_json()}"
+    finally:
+        flask_app.bid_token = previous_token
+        restore(original)
 
 
 ### ===============================================================================
@@ -691,6 +776,17 @@ if __name__ == "__main__":
     print("\nCORS")
     check("cross-origin preflight grants no origin",
           test_cross_origin_preflight_grants_no_origin)
+
+    print("\nX-Bid-Token")
+    check("POST without a token is unauthorized", test_post_without_a_token_is_unauthorized)
+    check("POST with the wrong token is unauthorized",
+          test_post_with_the_wrong_token_is_unauthorized)
+    check("DELETE without a token is unauthorized",
+          test_delete_without_a_token_is_unauthorized)
+    check("DELETE with the wrong token is unauthorized",
+          test_delete_with_the_wrong_token_is_unauthorized)
+    check("BID_TOKEN unset refuses every request even with a token",
+          test_bid_token_unset_refuses_every_request_even_with_a_token)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")

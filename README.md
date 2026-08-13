@@ -51,6 +51,12 @@ This is the one feature that writes to Kickbase, so it needs the Flask API (`app
 running alongside the frontend. Without it the cell reports that the API is unreachable;
 everything else in the table keeps working.
 
+The bid field also needs `BID_TOKEN` set. Both write endpoints require it on an
+`X-Bid-Token` header; the frontend dev server adds that header itself (from its own
+`BID_TOKEN` environment variable, via `frontend/src/setupProxy.js`) and it is never sent
+to the browser. Because of that, **port 3000 must not be exposed publicly** — anything
+that can reach the dev server can bid through its proxy exactly as the frontend does.
+
 ## Docker
 If you want to run this in a Docker container, you'll first need to set some mandatory environment variables:  
 

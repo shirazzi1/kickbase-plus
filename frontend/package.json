@@ -2,7 +2,6 @@
     "name": "kickbase-insights",
     "version": "1.0.0",
     "homepage": "https://github.com/casudo/Kickbase-Insights",
-    "proxy": "http://localhost:5000",
     "private": true,
     "dependencies": {
         "@emotion/react": "^11.10.4",

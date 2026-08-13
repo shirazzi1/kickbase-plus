@@ -13,6 +13,7 @@ from backend.kickbase.v4 import leagues, user
 kb_mail = getenv("KB_MAIL")
 kb_password = getenv("KB_PASSWORD")
 discord_webhook = getenv("DISCORD_WEBHOOK")
+bid_token = getenv("BID_TOKEN")
 
 ### ===============================================================================
 
@@ -97,6 +98,32 @@ def _listing(user_token: str, league_id: str, player_id: str):
     return None
 
 
+def _check_bid_token():
+    """### Rejects the request unless it carries the correct X-Bid-Token header.
+
+    Both write endpoints call this before doing anything else. The token is meant to
+    reach Flask only from the CRA dev server's setupProxy.js, never from the browser
+    directly - see frontend/src/setupProxy.js for where it is actually attached.
+
+    Fails closed: if BID_TOKEN is unset or empty, every request is refused rather than
+    let through. An unset secret must never be silently read as "no check configured",
+    or removing the env var would turn the check off instead of tightening it.
+
+    Returns:
+        A (response, status) tuple to return immediately if the request is rejected,
+        or None if the request may proceed.
+    """
+    if not bid_token:
+        logging.error("Flask API: BID_TOKEN is not set, refusing all bid requests.")
+        return jsonify({"error": "Der Server ist für Gebote nicht konfiguriert. Die "
+                                  "Umgebungsvariable BID_TOKEN muss gesetzt sein."}), 401
+
+    if request.headers.get("X-Bid-Token") != bid_token:
+        return jsonify({"error": "Ungültiges oder fehlendes Token für diese Aktion."}), 401
+
+    return None
+
+
 @app.route("/api/market/<player_id>/bid", methods=["POST"])
 def place_bid(player_id):
     """### Places a bid on a player on the transfer market.
@@ -104,6 +131,10 @@ def place_bid(player_id):
     Answers with the bid Kickbase confirms rather than the one that was sent, so a
     silently clamped or rounded bid is not displayed as the typed value.
     """
+    rejection = _check_bid_token()
+    if rejection is not None:
+        return rejection
+
     payload = request.get_json(silent=True) or {}
     price = payload.get("price")
 
@@ -155,6 +186,10 @@ def withdraw_bid(player_id):
     remembered: an id written into market.json hours ago would be stale, and the
     recorded response carries none in the first place.
     """
+    rejection = _check_bid_token()
+    if rejection is not None:
+        return rejection
+
     logging.info(f"Flask API: Withdrawing the bid on player {player_id}...")
 
     try:

@@ -31,6 +31,7 @@ RUN_SCHEDULE = getenv("RUN_SCHEDULE", "10 2,6,10,14,18,22 * * *")
 ### 10 2,6,10,14,18,22 * * * -> At minute 10 past every 4th hour starting from 2am
 START_DATE = getenv("START_DATE")
 START_MONEY = getenv("START_MONEY", "50000000")
+BID_TOKEN = getenv("BID_TOKEN")
 
 ### Display a welcoming message in Docker logs
 print("👍 Container started. Welcome!")
@@ -56,6 +57,15 @@ if DISCORD_WEBHOOK is None:
     exit()
 else:
     print("  ✅ DISCORD_WEBHOOK is set.")
+
+### Shared secret the bid field needs on app.py's write endpoints. Without it the
+### field simply will not work (every bid gets rejected with a 401), so a missing
+### value fails loudly here rather than surfacing later as a confusing UI error.
+if not BID_TOKEN:
+    print("  ❌ BID_TOKEN is not set. Exiting...")
+    exit()
+else:
+    print("  ✅ BID_TOKEN is set.")
 
 ### Check if RUN_SCHEDULE is using the default value
 if RUN_SCHEDULE == "10 2,6,10,14,18,22 * * *":
