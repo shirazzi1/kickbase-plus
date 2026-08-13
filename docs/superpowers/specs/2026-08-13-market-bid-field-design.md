@@ -233,11 +233,13 @@ Both are named so the next reader knows they were seen and deferred, not missed.
 
 ```js
 usableGrowth({ avgDailyGrowth })   // the growth, or null — the guard both columns share
-projectedMarketValue(row, days)    // marketValue + days · growth
 
 daysToBreakEven({ marketValue, price, avgDailyGrowth })   // (price − mv) / growth, floored at 0
-breakEvenBid(row, targetDays)                             // projectedMarketValue(row, targetDays)
+breakEvenBid(row, targetDays)                             // marketValue + days · growth
 ```
+
+A separate `projectedMarketValue` would be a second name for `breakEvenBid` with exactly
+one caller, so the projection is written inside it rather than beside it.
 
 The averaging leaves the frontend: it only ever lived here because the three fields it
 needed happened to be present, and it cannot express any other window. What remains is
