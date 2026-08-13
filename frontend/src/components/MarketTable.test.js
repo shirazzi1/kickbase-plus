@@ -1,12 +1,14 @@
 import { render, screen } from "@testing-library/react"
 
+import { currentTimestamps, mockDataServer, restoreFetch } from "../hooks/mockDataServer"
+
 // Two rows that differ in exactly the way the market does: a Kickbase listing with a real
 // expiry, and a user listing that only has a listing date.
 //
 // The listing dates are written relative to the clock on purpose. Fixed ones would age with
 // the calendar, and the forced sale score is built on the listing age - so a date in the
 // fixture would quietly change what the distress column claims from one day to the next.
-jest.mock("../data/market.json", () => ([
+const MARKET = [
     {
         playerId: "1811", teamId: "13", position: "ABW", firstName: "Jeffrey",
         lastName: "Gouweleeuw", status: 0, statusText: null,
@@ -36,11 +38,11 @@ jest.mock("../data/market.json", () => ([
         listedSince: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(), offerCount: 0,
         today: 1000, yesterday: 1000, twoDays: 1000, sevenDaysAvg: null, thirtyDaysAvg: null
     }
-]))
+]
 
 // Three managers: one rich rival, the user, and a seller deep in the red. Both listings are
 // priced at 10.000.000, so Anna can pay and the seller's own money is irrelevant.
-jest.mock("../data/balances.json", () => ([
+const BALANCES = [
     {
         userId: "1", username: "Anna", profilePic: null, teamValue: 100000000,
         balance: 5000000, maxBid: 30000000,
@@ -56,7 +58,7 @@ jest.mock("../data/balances.json", () => ([
         balance: -6000000, maxBid: 0,
         balanceWithBonuses: -6000000, maxBidWithBonuses: 0
     }
-]))
+]
 
 const MarketTable = require("./MarketTable").default
 
@@ -77,22 +79,42 @@ beforeAll(() => {
 // somewhere else on the page
 const rowOf = (name) => screen.getByText(name).closest("[role='row']")
 
+// The datasets arrive over HTTP now, so every case starts by serving them and every render
+// has to wait for the first row before it can assert anything. manager_profiles.json is
+// deliberately not served: absent profiles are the state on a fresh deployment, and the last
+// case below is about what the table does then.
+beforeEach(() => {
+    mockDataServer({
+        datasets: { "market.json": MARKET, "balances.json": BALANCES },
+        timestamps: currentTimestamps(["market", "balances"])
+    })
+})
+
+afterEach(restoreFetch)
+
+// Render and wait until the listings have landed. findByText is what makes the wait explicit:
+// the rows arrive a microtask after the first paint now, not with it.
+const showMarket = async () => {
+    render(<MarketTable />)
+    await screen.findByText("Matthias Ginter")
+}
+
 describe("MarketTable", () => {
-    it("renders a row per listing", () => {
-        render(<MarketTable />)
+    it("renders a row per listing", async () => {
+        await showMarket()
 
         expect(screen.getByText("Jeffrey Gouweleeuw")).toBeTruthy()
         expect(screen.getByText("Matthias Ginter")).toBeTruthy()
     })
 
-    it("keys its rows by player id rather than by array position", () => {
+    it("keys its rows by player id rather than by array position", async () => {
         // A duplicate or missing id makes the grid drop rows and log about it
         const errors = []
         const original = console.error
         console.error = (...args) => errors.push(String(args[0]))
 
         try {
-            render(<MarketTable />)
+            await showMarket()
         } finally {
             console.error = original
         }
@@ -104,24 +126,24 @@ describe("MarketTable", () => {
         expect(rows.length).toBe(4)
     })
 
-    it("shows a listing age for both listing sources", () => {
+    it("shows a listing age for both listing sources", async () => {
         // The user listing has no expiry, so its age is the only time signal it carries
-        render(<MarketTable />)
+        await showMarket()
 
         expect(screen.getByText("Gelistet seit")).toBeTruthy()
         expect(screen.getAllByText(/Std\.|Tag/).length).toBeGreaterThanOrEqual(2)
     })
 
-    it("leaves the countdown empty where there is no real expiry", () => {
-        render(<MarketTable />)
+    it("leaves the countdown empty where there is no real expiry", async () => {
+        await showMarket()
 
         expect(screen.getByText("Restzeit")).toBeTruthy()
         // Guessing a deadline for a user listing would put a wrong number in this column
         expect(screen.getAllByText("–").length).toBeGreaterThanOrEqual(1)
     })
 
-    it("names the managers who could pay the asking price", () => {
-        render(<MarketTable />)
+    it("names the managers who could pay the asking price", async () => {
+        await showMarket()
 
         expect(screen.getByText("Verdeckte Bieter")).toBeTruthy()
         // Anna can pay 10.000.000 on either foreign listing. The user is not their own
@@ -131,8 +153,8 @@ describe("MarketTable", () => {
         expect(screen.getAllByLabelText(/^Anna \(max\. 30\.000\.000/).length).toBe(2)
     })
 
-    it("shows a minimum winning bid capped at the user's own budget", () => {
-        render(<MarketTable />)
+    it("shows a minimum winning bid capped at the user's own budget", async () => {
+        await showMarket()
 
         expect(screen.getByText("Mindestgebot")).toBeTruthy()
         // Beating Anna's 30.000.000 is out of reach, so what is offered is the user's own
@@ -147,8 +169,8 @@ describe("MarketTable", () => {
         expect(rowOf("Matthias Ginter").textContent).toContain("dein Max.")
     })
 
-    it("offers no bid on the user's own listing", () => {
-        render(<MarketTable />)
+    it("offers no bid on the user's own listing", async () => {
+        await showMarket()
 
         // Bidding on your own player is impossible, so a number here would be nonsense -
         // and before the guard it was the richest manager's whole budget, in red
@@ -157,8 +179,8 @@ describe("MarketTable", () => {
         expect(own).not.toMatch(/20\.000\.000/)
     })
 
-    it("names the possible buyers of the user's own listing", () => {
-        render(<MarketTable />)
+    it("names the possible buyers of the user's own listing", async () => {
+        await showMarket()
 
         // The same set, read the other way round: who could take the player off you. Anna
         // can pay the 5.000.000, the broke seller of the other listing cannot.
@@ -166,8 +188,8 @@ describe("MarketTable", () => {
         expect(screen.queryAllByLabelText(/^Mögliche Käufer:.*Pleite/).length).toBe(0)
     })
 
-    it("flags a listing from a seller who is deep in the red", () => {
-        render(<MarketTable />)
+    it("flags a listing from a seller who is deep in the red", async () => {
+        await showMarket()
 
         // 6.000.000 in the red with nothing left to bid, up for over a day, no bids
         expect(rowOf("Matthias Ginter").textContent).toContain("Zwangsverkauf droht")
@@ -177,8 +199,8 @@ describe("MarketTable", () => {
         expect(rowOf("Thomas Müller").textContent).not.toContain("Zwangsverkauf")
     })
 
-    it("lists every manager's stack above the table", () => {
-        render(<MarketTable />)
+    it("lists every manager's stack above the table", async () => {
+        await showMarket()
 
         // Collapsed, so only the summary shows - and it places the user in the field
         expect(screen.getByText(/Bieter-Übersicht/)).toBeTruthy()
@@ -187,11 +209,11 @@ describe("MarketTable", () => {
         expect(screen.queryByText(/kein Manager als/)).toBeNull()
     })
 
-    it("leaves the bidder column out while there are no profiles", () => {
+    it("leaves the bidder column out while there are no profiles", async () => {
         // manager_profiles.json is written by the last stage of a scrape run and does not
         // exist on a fresh deployment. A column of dashes would read as "nobody wants any of
         // these players", so there is no column at all - and above all no broken table.
-        render(<MarketTable />)
+        await showMarket()
 
         expect(screen.queryByText("Wahrscheinliche Mitbieter")).toBeNull()
         expect(screen.getByText("Matthias Ginter")).toBeTruthy()

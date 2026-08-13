@@ -1,10 +1,14 @@
 import PagedDataGrid from "./PagedDataGrid"
 import Avatar from "@mui/material/Avatar"
 
-// Import data
-import data from "../data/league_user_stats.json"
+import { useJsonData } from "../hooks/useJsonData"
+import { dataGate } from "./DataState"
+
+const DATASET = "league_user_stats.json"
 
 function SeasonStatsTable() {
+    const { status, data, missing, error, reload } = useJsonData(DATASET)
+
     // Define the columns of the table
     const columns = [
         {
@@ -106,6 +110,13 @@ function SeasonStatsTable() {
             }
         }
     ]
+
+    // Every hook above this line: the gate returns early, and the rules of hooks do
+    // not allow that before the last of them has run.
+    const gate = dataGate({ name: DATASET, status, error, missing, reload })
+
+    if (gate)
+        return gate
 
     // Fill the rows with the players attributes from the JSON file
     const rows = data.map((row, i) => (

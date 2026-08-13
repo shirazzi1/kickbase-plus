@@ -24,21 +24,21 @@ import {
     forcedSaleRisk
 } from "./marketFormulas"
 import ManagerStacks, { ESTIMATE_NOTE } from "./ManagerStacks"
-import { bidderChipLabel, likelyBidders, loadManagerProfiles, managerProfileList } from "./managerProfiles"
+import {
+    PROFILES_DATASET,
+    bidderChipLabel,
+    likelyBidders,
+    managerProfileList
+} from "./managerProfiles"
+import { useJsonFiles } from "../hooks/useJsonData"
+import { dataGate } from "./DataState"
 
-// Import data
-import data from "../data/market.json"
-import balances from "../data/balances.json"
-
-// The manager fingerprints behind the "Wahrscheinliche Mitbieter" column. Null until a
-// scrape has written manager_profiles.json, and the column is then left out entirely rather
-// than shown empty - an empty cell there would claim nobody wants the player.
-//
-// A document with no managers in it counts as no document, the same way the dossier tab
-// reads it: the backend writes an entry per league member, so an empty one is a file that
-// cannot answer anything rather than a league that has not traded.
-const profiles = loadManagerProfiles()
-const hasProfiles = managerProfileList(profiles).length > 0
+// The three datasets this table joins. The listings are the table; the balances feed the
+// auction solver's three columns; the profiles feed the bidder chip. All three in one hook
+// call, so the table renders once rather than three times.
+const MARKET = "market.json"
+const BALANCES = "balances.json"
+const DATASETS = [MARKET, BALANCES, PROFILES_DATASET]
 
 const daysFormatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 })
 
@@ -92,6 +92,21 @@ const DISTRESS_LABELS = {
 
 function MarketTable() {
     const theme = useTheme()
+
+    const { status, data, missing, error, reload } = useJsonFiles(DATASETS)
+
+    const listings = data[MARKET]
+    const balances = data[BALANCES]
+
+    // The manager fingerprints behind the "Wahrscheinliche Mitbieter" column. Empty until a
+    // scrape has written manager_profiles.json, and the column is then left out entirely
+    // rather than shown empty - an empty cell there would claim nobody wants the player.
+    //
+    // A document with no managers in it counts as no document, the same way the dossier tab
+    // reads it: the backend writes an entry per league member, so an empty one is a file that
+    // cannot answer anything rather than a league that has not traded.
+    const profiles = data[PROFILES_DATASET]
+    const hasProfiles = managerProfileList(profiles).length > 0
 
     // Who "you" are, so the user is left out of their own rival set and a suggested bid is
     // capped at their own budget. Null until a scrape has written the flag.
@@ -508,8 +523,20 @@ function MarketTable() {
         },
     ]
 
+    // Every hook above this line: the gate returns early, and the rules of hooks do not
+    // allow that before the last of them has run.
+    //
+    // Named after the listings, because that is the dataset without which there is no table.
+    // Missing balances or profiles cost columns their meaning, not the table - and both of
+    // those already say so themselves: ManagerStacks warns about absent budget data, and the
+    // bidder column is left out entirely without profiles.
+    const gate = dataGate({ name: MARKET, status, error, missing: missing.includes(MARKET), reload })
+
+    if (gate)
+        return gate
+
     // Fill the rows with the players attributes from the JSON file
-    const rows = data.map((row, i) => {
+    const rows = listings.map((row, i) => {
         // A Date, so the column sorts chronologically instead of by string
         const expiration = row.expiration ? new Date(row.expiration) : null
 

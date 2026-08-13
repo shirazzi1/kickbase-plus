@@ -1,55 +1,23 @@
-// Reading manager_profiles.json without making it a build dependency, plus the derivations
-// the dossier tab and the market table's bidder chip need from it.
+// The derivations the dossier tab and the market table's bidder chip need from
+// manager_profiles.json.
 //
-// Two things shape this module:
+// One thing shapes this module: every metric in the file carries its own `n`. Nothing in here
+// fills a missing value in - a metric without data returns null, and the callers render
+// "keine Datenlage" instead of a zero that reads like a measurement.
 //
-//   1. The file is written by the last stage of a scrape run, and that stage has never run
-//      on any deployment yet. A static `import` of a file that is not there does not degrade
-//      gracefully - webpack fails the whole build with "Module not found", which takes every
-//      other tab down with it. See loadManagerProfiles().
-//   2. Every metric in the file carries its own `n`. Nothing in here fills a missing value
-//      in: a metric without data returns null, and the callers render "keine Datenlage"
-//      instead of a zero that reads like a measurement.
+// Reading the file used to live here too, as a `require.context("../data", ...)`. That was a
+// workaround for a compile-time import of a file the scrape may not have written yet: webpack
+// resolved *whatever matched* in the directory, so an absent manager_profiles.json left an
+// empty map instead of failing the build with "Module not found". Fetching at runtime removes
+// the problem rather than working around it - a 404 is just a 404 - so the consumers use
+// hooks/useJsonData.js like every other component, and this module is pure derivation again.
 
 import { affordableRivals } from "./marketFormulas"
 
+// The dataset the two consumers fetch. Here so both name it the same thing.
+export const PROFILES_DATASET = "manager_profiles.json"
+
 const isMissing = (value) => value === null || value === undefined
-
-// The one file this module reads, as require.context keys it
-const PROFILES_KEY = "./manager_profiles.json"
-
-/**
- * The profiles document, or null when the scrape has not written it yet.
- *
- * `require.context` is what keeps a missing file from being a build error: it asks webpack
- * for *whatever matches* in a directory instead of for one specific module, so an absent
- * manager_profiles.json leaves an empty map rather than an unresolved import. The directory
- * itself is safe to ask for - the market table's static imports already make the build fail
- * without it.
- *
- * Under Jest there is no webpack and therefore no context to ask, so this returns null
- * there. That is why both consumers take their profiles as a prop with this as the default:
- * the tests hand in fixtures, the app hands in the file.
- */
-export function loadManagerProfiles() {
-    try {
-        const context = require.context("../data", false, /^\.\/manager_profiles\.json$/)
-
-        if (!context.keys().includes(PROFILES_KEY))
-            return null
-
-        const document = context(PROFILES_KEY)
-
-        // Webpack hands JSON back as a module namespace under some settings and as the plain
-        // object under others
-        return document?.managers ? document : document?.default ?? null
-    } catch (error) {
-        // Two situations end up here, and neither may cost more than the dossier's content:
-        // a file that exists but does not parse, and a runtime without require.context -
-        // which is Jest, where the components take their profiles as a prop instead.
-        return null
-    }
-}
 
 /**
  * The managers in the document, alphabetically, or an empty list when there is no document.

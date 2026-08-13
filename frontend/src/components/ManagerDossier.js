@@ -9,7 +9,9 @@ import { Box, alpha, useTheme } from "@mui/material"
 
 import { percentFormatter, unsignedPercentFormatter } from "./SharedConstants"
 import { formatDuration } from "./marketFormulas"
-import { coverageNote, loadManagerProfiles, managerProfileList } from "./managerProfiles"
+import { PROFILES_DATASET, coverageNote, managerProfileList } from "./managerProfiles"
+import { ERROR, LOADING, useJsonData } from "../hooks/useJsonData"
+import { DataError, DataLoading } from "./DataState"
 
 // What the whole tab rests on, in one sentence. Kickbase's feed shows completed bookings
 // only - never a lost bid, never a counter-bid - so every number here is a habit read off
@@ -267,13 +269,26 @@ const ManagerCard = ({ profile }) => {
 /**
  * The dossier tab: one card per manager in the league.
  *
- * Reads manager_profiles.json, which the last stage of a scrape run writes. Until that stage
- * has run once the file is not there at all - see loadManagerProfiles() for why that is a
- * missing tab content and not a failed build.
+ * Fetches manager_profiles.json, which the last stage of a scrape run writes. Until that stage
+ * has run once the file is not there at all, which the backend answers as a 404 and the hook
+ * turns into an empty document - the info box below is what that looks like.
+ *
+ * `profiles` stays a prop so the tests can hand in fixtures; nothing is fetched then.
  */
-function ManagerDossier({ profiles = loadManagerProfiles() }) {
-    const managers = managerProfileList(profiles)
-    const note = coverageNote(profiles)
+function ManagerDossier({ profiles }) {
+    const fetched = useJsonData(profiles === undefined ? PROFILES_DATASET : null)
+    const document = profiles === undefined ? fetched.data : profiles
+
+    const managers = managerProfileList(document)
+    const note = coverageNote(document)
+
+    if (profiles === undefined) {
+        if (fetched.status === LOADING)
+            return <DataLoading name={PROFILES_DATASET} />
+
+        if (fetched.status === ERROR)
+            return <DataError name={PROFILES_DATASET} error={fetched.error} onRetry={fetched.reload} />
+    }
 
     // The backend writes an entry per manager even for one who has never traded, so an empty
     // list means the file is missing or unreadable - never a quiet league

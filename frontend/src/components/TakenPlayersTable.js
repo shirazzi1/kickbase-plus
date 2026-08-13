@@ -3,9 +3,14 @@ import Tooltip from '@mui/material/Tooltip'
 import { trendIcons, currencyFormatter, getStatusIcon } from './SharedConstants'
 import { Box } from '@mui/material'
 
-import data from '../data/taken_players.json'
+import { useJsonData } from "../hooks/useJsonData"
+import { dataGate } from "./DataState"
+
+const DATASET = "taken_players.json"
 
 function TakenPlayersTable() {
+    const { status, data, missing, error, reload } = useJsonData(DATASET)
+
     const columns = [
         {
             field: 'teamLogo',
@@ -101,6 +106,13 @@ function TakenPlayersTable() {
             flex: 2
         }
     ]
+
+    // Every hook above this line: the gate returns early, and the rules of hooks do
+    // not allow that before the last of them has run.
+    const gate = dataGate({ name: DATASET, status, error, missing, reload })
+
+    if (gate)
+        return gate
 
     const rows = data.map((row, i) => (
         {

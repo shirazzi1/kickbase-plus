@@ -1,12 +1,14 @@
 import { render, screen } from "@testing-library/react"
 
-// The same table as in MarketTable.test.js, but with manager profiles on disk - which is a
-// separate file rather than a second describe block, because swapping the profiles module out
-// mid-file means re-requiring the table and with it a second copy of React.
+import { currentTimestamps, mockDataServer, restoreFetch } from "../hooks/mockDataServer"
+
+// The same table as in MarketTable.test.js, but with manager profiles on disk. Still a separate
+// file rather than a second describe block: the two cases want two different answers from the
+// same URL, and one server per suite is easier to read than one that changes mid-file.
 
 // Three listings from three different clubs: one Kickbase listing, one from a rival, one of
 // the user's own. Team ids are what the chip matches on.
-jest.mock("../data/market.json", () => ([
+const MARKET = [
     {
         playerId: "1811", teamId: "13", position: "ABW", firstName: "Jeffrey",
         lastName: "Gouweleeuw", status: 0, statusText: null,
@@ -34,11 +36,11 @@ jest.mock("../data/market.json", () => ([
         listedSince: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(), offerCount: 0,
         today: 1000, yesterday: 1000, twoDays: 1000, sevenDaysAvg: null, thirtyDaysAvg: null
     }
-]))
+]
 
 // Anna is the only manager who can pay 10.000.000: the user is not their own rival and the
 // seller of the Ginter listing has nothing.
-jest.mock("../data/balances.json", () => ([
+const BALANCES = [
     {
         userId: "1", username: "Anna", profilePic: null, teamValue: 100000000,
         balance: 5000000, maxBid: 30000000,
@@ -54,35 +56,32 @@ jest.mock("../data/balances.json", () => ([
         balance: -6000000, maxBid: 0,
         balanceWithBonuses: -6000000, maxBidWithBonuses: 0
     }
-]))
+]
 
 // Anna buys from two clubs and from nowhere else, and she is no momentum buyer - so of the
-// three listings exactly the two from her clubs fit her. The loader itself is what gets
-// replaced: it reads the file through require.context, which Jest has no webpack for. Every
-// pure function around it stays real, so this runs the same heuristic the app runs.
-jest.mock("./managerProfiles", () => ({
-    ...jest.requireActual("./managerProfiles"),
-    loadManagerProfiles: () => ({
-        marketValueCoverage: { players: 20, of: 20 },
-        managers: {
-            1: {
-                managerId: "1",
-                managerName: "Anna",
-                holdDuration: { medianDays: 2, medianSeconds: 172800, n: 6, roundTripsWithinAnHour: 0 },
-                purchaseMarkup: { meanPercent: 4.2, medianPercent: 3.1, n: 6, buysConsidered: 6 },
-                momentumBuys: { share: 0.2, risingBuys: 1, n: 6, windowDays: 7 },
-                topClubs: {
-                    clubs: [
-                        { teamId: "5", teamName: "Borussia Dortmund", buys: 6 },
-                        { teamId: "8", teamName: "FC Bayern", buys: 3 }
-                    ],
-                    n: 9
-                },
-                activityWindow: { hourCounts: Array(24).fill(0), peakHour: null, n: 0, timezone: "Europe/Berlin" }
-            }
+// three listings exactly the two from her clubs fit her. Served rather than mocked into the
+// module: the table fetches this file now, and every pure function stays real, so this runs the
+// same heuristic the app runs.
+const PROFILES = {
+    marketValueCoverage: { players: 20, of: 20 },
+    managers: {
+        1: {
+            managerId: "1",
+            managerName: "Anna",
+            holdDuration: { medianDays: 2, medianSeconds: 172800, n: 6, roundTripsWithinAnHour: 0 },
+            purchaseMarkup: { meanPercent: 4.2, medianPercent: 3.1, n: 6, buysConsidered: 6 },
+            momentumBuys: { share: 0.2, risingBuys: 1, n: 6, windowDays: 7 },
+            topClubs: {
+                clubs: [
+                    { teamId: "5", teamName: "Borussia Dortmund", buys: 6 },
+                    { teamId: "8", teamName: "FC Bayern", buys: 3 }
+                ],
+                n: 9
+            },
+            activityWindow: { hourCounts: Array(24).fill(0), peakHour: null, n: 0, timezone: "Europe/Berlin" }
         }
-    })
-}))
+    }
+}
 
 const MarketTable = require("./MarketTable").default
 
@@ -101,7 +100,23 @@ beforeAll(() => {
 const rowOf = (name) => screen.getByText(name).closest("[role='row']")
 
 describe("MarketTable, the likely bidder chip", () => {
-    beforeEach(() => render(<MarketTable />))
+    beforeEach(async () => {
+        mockDataServer({
+            datasets: {
+                "market.json": MARKET,
+                "balances.json": BALANCES,
+                "manager_profiles.json": PROFILES
+            },
+            timestamps: currentTimestamps(["market", "balances", "manager_profiles"])
+        })
+
+        render(<MarketTable />)
+
+        // The rows arrive a microtask after the first paint now
+        await screen.findByText("Matthias Ginter")
+    })
+
+    afterEach(restoreFetch)
 
     it("names the affordable managers whose buying pattern fits the player", () => {
         expect(screen.getByText("Wahrscheinliche Mitbieter")).toBeTruthy()

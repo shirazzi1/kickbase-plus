@@ -2,9 +2,14 @@ import PagedDataGrid from './PagedDataGrid'
 import { currencyFormatter } from './SharedConstants'
 import { Box } from '@mui/material'
 
-import data from '../data/turnovers.json'
+import { useJsonData } from "../hooks/useJsonData"
+import { dataGate } from "./DataState"
+
+const DATASET = "turnovers.json"
 
 function TurnoversTable() {
+    const { status, data, missing, error, reload } = useJsonData(DATASET)
+
     const columns = [
         {
             field: 'teamLogo',
@@ -88,6 +93,13 @@ function TurnoversTable() {
             flex: 2
         }
     ]
+
+    // Every hook above this line: the gate returns early, and the rules of hooks do
+    // not allow that before the last of them has run.
+    const gate = dataGate({ name: DATASET, status, error, missing, reload })
+
+    if (gate)
+        return gate
 
     // Fill the rows with the players attributes from the JSON file
     const rows = data.map((row, i) => (

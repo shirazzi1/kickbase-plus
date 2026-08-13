@@ -8,10 +8,14 @@ import Box from "@mui/material/Box"
 import FormControlLabel from "@mui/material/FormControlLabel"
 import Switch from "@mui/material/Switch"
 
-// Import data
-import data from "../data/balances.json"
+import { useJsonData } from "../hooks/useJsonData"
+import { dataGate } from "./DataState"
+
+const DATASET = "balances.json"
 
 function Balances() {
+    const { status, data, missing, error, reload } = useJsonData(DATASET)
+
     // The manager whose balance events are on screen, or null while the dialog is closed
     const [selectedManager, setSelectedManager] = useState(null)
 
@@ -65,6 +69,13 @@ function Balances() {
             valueFormatter: ({ value }) => currencyFormatter.format(Number(value)),
         },
     ]
+
+    // Every hook above this line: the gate returns early, and the rules of hooks do
+    // not allow that before the last of them has run.
+    const gate = dataGate({ name: DATASET, status, error, missing, reload })
+
+    if (gate)
+        return gate
 
     // Fill the rows with the attributes from the JSON file
     const rows = data.map((row, i) => (

@@ -33,47 +33,88 @@ import TeamValueLineChart from "./components/TeamValueLineChart"
 import Changelog from "./components/Changelog"
 import LeagueUserTable from "./components/LeagueUserTable"
 import SeasonStatsTable from "./components/SeasonStatsTable"
-// import LivePoints from "./components/LivePoints"
+import LivePoints from "./components/LivePoints"
 import Balances from "./components/Balances"
 import Battles from "./components/Battles"
 import ManagerDossier from "./components/ManagerDossier"
+import TabErrorBoundary from "./components/TabErrorBoundary"
+import TabFreshness from "./components/TabFreshness"
 
-// Import timestamps
-import timestamp_main from "./data/timestamps/ts_main.json"
-import timestamp_market from "./data/timestamps/ts_market.json"
-import timestamp_market_value_changes from "./data/timestamps/ts_market_value_changes.json"
-import timestamp_taken_players from "./data/timestamps/ts_taken_players.json"
-import timestamp_free_players from "./data/timestamps/ts_free_players.json"
-import timestamp_turnovers from "./data/timestamps/ts_turnovers.json"
-import timestamp_team_values from "./data/timestamps/ts_team_values.json"
-import timestamp_revenue_sum from "./data/timestamps/ts_revenue_sum.json"
-import timestamp_league_user_stats from "./data/timestamps/ts_league_user_stats.json"
-// import timestamp_live_points from "./data/timestamps/ts_live_points.json"
-import timestamp_balances from "./data/timestamps/ts_balances.json"
-
-// What each stage of the last run did. Every timestamp above carries the id of the run
-// that wrote it, so this is what turns "there is a date here" into "this table is current".
-import run_manifest from "./data/timestamps/ts_run_manifest.json"
+// The timestamps used to be fourteen compile-time imports of files the scraper writes, which
+// is why a fresh checkout could not build and why a finished run needed a recompile to show
+// up. They now arrive as one document from /api/data/timestamps, polled on a timer - and a run
+// id this page has not seen makes every table refetch itself. See hooks/useJsonData.js.
+import { DataRefreshContext, useTimestampIndex } from "./hooks/useJsonData"
 
 import { datasetStatus, runStatus, runSummary, statusColour, statusLabel } from "./components/freshness"
 
 // The datasets shown in the Dev tab, in the order the run writes them
 const DATASETS = [
-    ["market", "Market", timestamp_market],
-    ["market_value_changes", "Market Value Changes", timestamp_market_value_changes],
-    ["taken_players", "Taken Players", timestamp_taken_players],
-    ["free_players", "Free Players", timestamp_free_players],
-    ["balances", "Balances", timestamp_balances],
-    ["turnovers", "Turnovers", timestamp_turnovers],
-    ["revenue_sum", "Revenue Sum", timestamp_revenue_sum],
-    ["team_values", "Team Values", timestamp_team_values],
-    ["league_user_stats", "League User Stats", timestamp_league_user_stats]
-    // ["live_points", "Live Points", timestamp_live_points]
+    ["market", "Market"],
+    ["market_value_changes", "Market Value Changes"],
+    ["taken_players", "Taken Players"],
+    ["free_players", "Free Players"],
+    ["balances", "Balances"],
+    ["turnovers", "Turnovers"],
+    ["revenue_sum", "Revenue Sum"],
+    ["team_values", "Team Values"],
+    ["league_user_stats", "League User Stats"],
+    ["manager_profiles", "Manager Profiles"],
+    ["events", "Events"],
+    ["live_points", "Live Points"]
 ]
+
+// Which datasets each tab actually shows, so a tab can say "the table you are looking at is a
+// run behind" instead of leaving that to one badge in the header. Names as the timestamp index
+// keys them.
+const TAB_DATASETS = {
+    tagesplan: ["events"],
+    transfers: ["market", "market_value_changes", "taken_players", "manager_profiles"],
+    revenue: ["turnovers", "revenue_sum", "team_values"],
+    players: ["taken_players", "free_players"],
+    live: ["live_points", "taken_players"],
+    league: ["league_user_stats", "balances"],
+    manager: ["manager_profiles"]
+}
+
+// The German name of each tab, for the error boundary's message. A boundary that says
+// "Bereich transfers" instead of "Transfermarkt" tells the reader nothing they can act on.
+const TAB_LABELS = {
+    tagesplan: "Tagesplan",
+    transfers: "Transfers",
+    revenue: "Transfererlöse",
+    players: "Spieler",
+    live: "Live",
+    league: "Liga",
+    manager: "Manager"
+}
 
 // Create dark and light themes using Material-UI
 const darkTheme = createTheme({ palette: { mode: "dark" } })
 const lightTheme = createTheme({ palette: { mode: "light" } })
+
+// A timestamp that may not have arrived yet. `new Date(undefined)` renders as "Invalid Date",
+// which was impossible while these were compile-time imports and is the normal first paint now.
+function formatMoment(value) {
+    return value ? new Date(value).toLocaleString("de-DE") : "–"
+}
+
+/**
+ * What wraps every tab's content: the freshness chips and the error boundary.
+ *
+ * Both, always, because they answer the two questions runtime data introduced - "is what I am
+ * looking at current" and "did this tab survive its data". A module level component on purpose:
+ * declared inside App() it would be a new component type on every render, and React would
+ * remount every table underneath it, losing the page and the sort as it went.
+ */
+function TabShell({ name, timestamps, manifest, children }) {
+    return (
+        <>
+            <TabFreshness datasets={TAB_DATASETS[name]} timestamps={timestamps} manifest={manifest} />
+            <TabErrorBoundary name={TAB_LABELS[name] ?? name}>{children}</TabErrorBoundary>
+        </>
+    )
+}
 
 // Main App component
 function App() {
@@ -83,39 +124,22 @@ function App() {
   const [selectedTab, setSelectedTab] = useState("0")
   const [darkModeEnabled, setDarkModeEnabled] = useState(false)
   const [disclaimerVisible, setDisclaimerVisible] = useState(true);
-  // const [refreshing, setRefreshing] = useState(false); // State to manage refreshing
-  
+
+  // The freshness index, polled. Provided to the whole tree, because a finished run has to
+  // reach the open tab without a reload - which is the point of the whole phase.
+  const refresh = useTimestampIndex()
+  const timestamps = refresh.timestamps
+  const run_manifest = refresh.manifest
+  const timestamp_main = timestamps.main ?? {}
+
   // Handlers
   const handleCloseDisclaimer = () => setDisclaimerVisible(false);
-
-  // const RefreshButtonLivepoints = () => (
-  //   <Button onClick={handleRefreshLivepoints} disabled={refreshing}>
-  //     {refreshing ? "Refreshing..." : "Refresh Live Points"}
-  //   </Button>
-  // );
-
-  // // Function to handle Live Points refresh button click
-  // const handleRefreshLivepoints = async () => {
-  //   // Set refreshing to true to indicate the refresh is in progress
-  //   setRefreshing(true);
-
-  //   try {
-  //     const response = await fetch("/api/livepoints")
-  //     const data = await response.json();
-  //     // Handle the retrieved data (update state, etc.)
-  //     console.log(data);
-  //   } catch (error) {
-  //     console.error("Error refreshing live points data:", error);
-  //   } finally {
-  //     // Set refreshing to false once the refresh is complete
-  //     setRefreshing(false);
-  //   }
-  // };
 
   // Return the JSX for the App component
   // TODO: The what?
   return (
     // ThemeProvider enables theming using Material-UI themes
+    <DataRefreshContext.Provider value={refresh}>
     <ThemeProvider theme={darkModeEnabled ? darkTheme : lightTheme}>
       {/* CssBaseline provides a consistent baseline style across browsers */}
       <CssBaseline />
@@ -156,7 +180,7 @@ function App() {
                   like one that had just finished. */}
               <Tooltip title={runSummary(run_manifest)} arrow>
                 <Typography variant="button" style={{ color: statusColour(runStatus(run_manifest)), opacity: "0.7", cursor: "help" }}>
-                  {new Date(timestamp_main.time).toLocaleString("de-DE")}
+                  {formatMoment(timestamp_main.time)}
                   {runStatus(run_manifest) !== "current" && ` (${statusLabel(runStatus(run_manifest))})`}
                 </Typography>
               </Tooltip>
@@ -172,7 +196,7 @@ function App() {
                 <Tab label="Transfers" value="1" />
                 <Tab label="Transfererlöse" value="2" />
                 <Tab label="Spieler" value="3" />
-                {/* <Tab label="Live" value="4" /> */}
+                <Tab label="Live" value="4" />
                 <Tab label="Liga" value="5" />
                 {/* Next to the league table on purpose: both tabs are about the managers
                     rather than about the players */}
@@ -190,94 +214,113 @@ function App() {
 
           {/* TabPanel contains the content for each tab */}
           <TabPanel sx={{ padding: 0 }} value="0">
+            <TabShell name="tagesplan" timestamps={timestamps} manifest={run_manifest}>
 
-            {/* What changed since the last runs. Everything else in this app shows a state;
-                this shows the difference between two of them. */}
-            <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Tagesplan <HelpIcon text="Was sich in den letzten 48 Stunden geändert hat, aus dem Vergleich aufeinanderfolgender Läufe: neue Listungen, Preissenkungen, Marktwertsprünge, ablaufende Kickbase-Angebote und Manager, denen der Spielraum ausgeht. Die Kennzeichnung sagt, wie dringend es ist - 'Jetzt' heißt, dass Warten bis zum nächsten Blick wahrscheinlich zu spät ist. Ein Ablaufdatum liefert Kickbase nur für seine eigenen Angebote, deshalb tauchen von Managern gelistete Spieler hier nie als 'Läuft ab' auf."/></Typography>
-              <Tagesplan />
-            </Paper>
+              {/* What changed since the last runs. Everything else in this app shows a state;
+                  this shows the difference between two of them. */}
+              <Paper sx={{ marginTop: "25px" }} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Tagesplan <HelpIcon text="Was sich in den letzten 48 Stunden geändert hat, aus dem Vergleich aufeinanderfolgender Läufe: neue Listungen, Preissenkungen, Marktwertsprünge, ablaufende Kickbase-Angebote und Manager, denen der Spielraum ausgeht. Die Kennzeichnung sagt, wie dringend es ist - 'Jetzt' heißt, dass Warten bis zum nächsten Blick wahrscheinlich zu spät ist. Ein Ablaufdatum liefert Kickbase nur für seine eigenen Angebote, deshalb tauchen von Managern gelistete Spieler hier nie als 'Läuft ab' auf."/></Typography>
+                <Tagesplan />
+              </Paper>
+            </TabShell>
           </TabPanel>
 
           <TabPanel sx={{ padding: 0 }} value="1">
+            <TabShell name="transfers" timestamps={timestamps} manifest={run_manifest}>
             
-            {/* "Transfers" related components */}
-            <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Transfermarkt <HelpIcon text="Alle Spieler auf dem Transfermarkt. Hellblau hinterlegte Zeilen sind Free Agents, also direkt von Kickbase gelistet; alle anderen sind von Nutzern aus der Liga gelistet. 'Dein Gebot' zeigt dein laufendes Gebot und den Aufschlag auf den aktuellen Marktwert. Ein Ablaufdatum liefert Kickbase nur für die eigenen Angebote. 'Tage bis BEP' sind die Tage, die der Marktwert beim Zuwachs der letzten drei Tage braucht, um den Preis einzuholen; ein Strich heißt, dass der Marktwert gerade nicht steigt. Neben jeder Euro-Spalte steht derselbe Zuwachs relativ zum aktuellen Marktwert. 'Verdeckte Bieter', 'Mindestgebot' und 'Zwangsverkauf droht' rechnen mit den geschätzten Budgets aus den Balances - Kickbase verrät weder Kontostände noch wer bietet, also sind das Schätzungen; die Spaltenköpfe sagen jeweils, welche. Die Bieter-Übersicht über der Tabelle zeigt alle Manager nach geschätztem Maximalgebot. 'Wahrscheinliche Mitbieter' schneidet diese Budgets mit dem bisherigen Kaufverhalten aus dem Manager-Dossier: Manager, die den Preis zahlen könnten und die öfter bei diesem Klub oder überwiegend in steigende Marktwerte kaufen. Die Spalte erscheint erst, wenn ein Scrape-Lauf die Manager-Profile geschrieben hat."/></Typography>
-              <MarketTable />
-            </Paper>
-            <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Marktwertveränderungen</Typography>
-              <MarketValueChangesTable />
-            </Paper>
-            <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Aufstellungsplaner <HelpIcon text="Der aktuelle Kontostand kann eingegeben und Spieler in der letzten Spalte zum Verkaufen markiert werden. Der neue Kontostand wird dynamisch ausgerechnet. Mögliche Formationen werden über der Tabelle angezeigt: Spieler im Kader (blau), mögliche Formation (grün), nicht mögliche Formation (rot)" /></Typography>
-              <LineupPlanner />
-            </Paper>
+              {/* "Transfers" related components */}
+              <Paper sx={{ marginTop: "25px" }} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Transfermarkt <HelpIcon text="Alle Spieler auf dem Transfermarkt. Hellblau hinterlegte Zeilen sind Free Agents, also direkt von Kickbase gelistet; alle anderen sind von Nutzern aus der Liga gelistet. 'Dein Gebot' zeigt dein laufendes Gebot und den Aufschlag auf den aktuellen Marktwert. Ein Ablaufdatum liefert Kickbase nur für die eigenen Angebote. 'Tage bis BEP' sind die Tage, die der Marktwert beim Zuwachs der letzten drei Tage braucht, um den Preis einzuholen; ein Strich heißt, dass der Marktwert gerade nicht steigt. Neben jeder Euro-Spalte steht derselbe Zuwachs relativ zum aktuellen Marktwert. 'Verdeckte Bieter', 'Mindestgebot' und 'Zwangsverkauf droht' rechnen mit den geschätzten Budgets aus den Balances - Kickbase verrät weder Kontostände noch wer bietet, also sind das Schätzungen; die Spaltenköpfe sagen jeweils, welche. Die Bieter-Übersicht über der Tabelle zeigt alle Manager nach geschätztem Maximalgebot. 'Wahrscheinliche Mitbieter' schneidet diese Budgets mit dem bisherigen Kaufverhalten aus dem Manager-Dossier: Manager, die den Preis zahlen könnten und die öfter bei diesem Klub oder überwiegend in steigende Marktwerte kaufen. Die Spalte erscheint erst, wenn ein Scrape-Lauf die Manager-Profile geschrieben hat."/></Typography>
+                <MarketTable />
+              </Paper>
+              <Paper sx={{ marginTop: "25px" }} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Marktwertveränderungen</Typography>
+                <MarketValueChangesTable />
+              </Paper>
+              <Paper sx={{ marginTop: "25px" }} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Aufstellungsplaner <HelpIcon text="Der aktuelle Kontostand kann eingegeben und Spieler in der letzten Spalte zum Verkaufen markiert werden. Der neue Kontostand wird dynamisch ausgerechnet. Mögliche Formationen werden über der Tabelle angezeigt: Spieler im Kader (blau), mögliche Formation (grün), nicht mögliche Formation (rot)" /></Typography>
+                <LineupPlanner />
+              </Paper>
+            </TabShell>
           </TabPanel>
 
           <TabPanel sx={{ padding: 0 }} value="2">
-            {/* "Transfererlöse" related components */}
-            <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Transfererlöse <HelpIcon text="Liste alle verkauften Spieler und deren Erlöse. Gut zum recherchieren, welcher Spieler den meisten Gewinn oder Verlust erbracht hat."/></Typography>
-              <TurnoversTable />
-            </Paper>
-            <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Summe der Transfererlöse <HelpIcon text="Zeigt den Gesamtgewinn oder Verlust des jeweiligen Spielers in der Saison an."/></Typography>
-              <TransferRevenueLineChart darkModeEnabled={darkModeEnabled} />
-            </Paper>
-            <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Teamwert</Typography>
-              <TeamValueLineChart darkModeEnabled={darkModeEnabled} />
-            </Paper>
+            <TabShell name="revenue" timestamps={timestamps} manifest={run_manifest}>
+              {/* "Transfererlöse" related components */}
+              <Paper sx={{ marginTop: "25px" }} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Transfererlöse <HelpIcon text="Liste alle verkauften Spieler und deren Erlöse. Gut zum recherchieren, welcher Spieler den meisten Gewinn oder Verlust erbracht hat."/></Typography>
+                <TurnoversTable />
+              </Paper>
+              <Paper sx={{ marginTop: "25px" }} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Summe der Transfererlöse <HelpIcon text="Zeigt den Gesamtgewinn oder Verlust des jeweiligen Spielers in der Saison an."/></Typography>
+                <TransferRevenueLineChart darkModeEnabled={darkModeEnabled} />
+              </Paper>
+              <Paper sx={{ marginTop: "25px" }} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Teamwert</Typography>
+                <TeamValueLineChart darkModeEnabled={darkModeEnabled} />
+              </Paper>
+            </TabShell>
           </TabPanel>
 
           <TabPanel sx={{ padding: 0 }} value="3">
-            {/* "Spieler" related components */}
-            <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Gebundene Spieler</Typography>
-              <TakenPlayersTable />
-            </Paper>
-            <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Freie Spieler</Typography>
-              <FreePlayersTable />
-            </Paper>
+            <TabShell name="players" timestamps={timestamps} manifest={run_manifest}>
+              {/* "Spieler" related components */}
+              <Paper sx={{ marginTop: "25px" }} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Gebundene Spieler</Typography>
+                <TakenPlayersTable />
+              </Paper>
+              <Paper sx={{ marginTop: "25px" }} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Freie Spieler</Typography>
+                <FreePlayersTable />
+              </Paper>
+            </TabShell>
           </TabPanel>
 
-          {/* <TabPanel sx={{ padding: 0 }} value="4"> */}
-            {/* "Live" related components */}
-            {/* <Paper sx={{ marginTop: "25px"}} elevation={5}> */}
-              {/* <Typography variant="h4" sx={{ padding: "15px" }}>Live Punkte <HelpIcon text="Um die Live Punkte zu benutzen, aktualisiert die Punkte mit den dafür vorgesehenen Knopf. Anschließend muss die Website einmal neu geladen werden."/> <RefreshButtonLivepoints/> </Typography> */}
-              {/* <LivePoints /> */}
-            {/* </Paper> */}
-          {/* </TabPanel> */}
+          <TabPanel sx={{ padding: 0 }} value="4">
+            {/* "Live" related components.
+                Commented out until this phase, because live_points.json is written by
+                /api/livepoints rather than by a scheduled run - so on a fresh deployment the
+                file was absent and the compile-time import failed the build for every tab.
+                A missing dataset is an empty state now, so the tab is reachable. What it shows
+                is the last live snapshot with its age, which LivePoints.js says out loud. */}
+            <TabShell name="live" timestamps={timestamps} manifest={run_manifest}>
+              <Paper sx={{ marginTop: "25px"}} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Live Punkte <HelpIcon text="Die Live-Punkte des laufenden Spieltags und der Swing-Meter darüber: welcher Teil des Abstands zu einem gewählten Rivalen feststeht und welcher noch auf dem Platz ist. Der reguläre Scrape-Lauf holt die Live-Punkte nicht, deshalb ist der angezeigte Stand der des letzten Abrufs - wie alt er ist, sagt der Chip über den Balken."/></Typography>
+                <LivePoints />
+              </Paper>
+            </TabShell>
+          </TabPanel>
 
           <TabPanel sx={{ padding: 0 }} value="5">
-            {/* "Liga" related components */}
-            <Paper sx={{ marginTop: "25px"}} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Tabelle <HelpIcon text="Die Statistiken beziehen sich auf die aktuell laufende Saison."/></Typography>
-              <LeagueUserTable />
-            </Paper>            
-            <Paper sx={{ marginTop: "25px"}} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Saison Statistiken <HelpIcon text="Die Statistiken beziehen sich auf die aktuell laufende Saison."/></Typography>
-              <SeasonStatsTable />
-            </Paper>                   
-            <Paper sx={{ marginTop: "25px"}} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Balances <HelpIcon text="Ungefähre Kontostände der Manager. Ohne den Schalter zählen nur Transfers. Mit dem Schalter kommen täglicher Login-Bonus und Erfolge dazu - beides geschätzt: der tägliche Login wird für alle unterstellt, die Erfolge werden aus dem Spielstand abgeleitet. Erfolge, die sich nicht herleiten lassen, fehlen."/></Typography>
-              <Balances />
-            </Paper>
-            <Paper sx={{ marginTop: "25px"}} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Battles <HelpIcon text="Herausragende Leistungen von Spielern in der Liga."/></Typography>
-              <Battles />
-            </Paper>        
+            <TabShell name="league" timestamps={timestamps} manifest={run_manifest}>
+              {/* "Liga" related components */}
+              <Paper sx={{ marginTop: "25px"}} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Tabelle <HelpIcon text="Die Statistiken beziehen sich auf die aktuell laufende Saison."/></Typography>
+                <LeagueUserTable />
+              </Paper>            
+              <Paper sx={{ marginTop: "25px"}} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Saison Statistiken <HelpIcon text="Die Statistiken beziehen sich auf die aktuell laufende Saison."/></Typography>
+                <SeasonStatsTable />
+              </Paper>                   
+              <Paper sx={{ marginTop: "25px"}} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Balances <HelpIcon text="Ungefähre Kontostände der Manager. Ohne den Schalter zählen nur Transfers. Mit dem Schalter kommen täglicher Login-Bonus und Erfolge dazu - beides geschätzt: der tägliche Login wird für alle unterstellt, die Erfolge werden aus dem Spielstand abgeleitet. Erfolge, die sich nicht herleiten lassen, fehlen."/></Typography>
+                <Balances />
+              </Paper>
+              <Paper sx={{ marginTop: "25px"}} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Battles <HelpIcon text="Herausragende Leistungen von Spielern in der Liga."/></Typography>
+                <Battles />
+              </Paper>        
+            </TabShell>
           </TabPanel>
 
           <TabPanel sx={{ padding: 0 }} value="8">
-            {/* "Manager" related components */}
-            <Paper sx={{ marginTop: "25px"}} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Manager-Dossier <HelpIcon text="Pro Manager vier Kennzahlen aus den abgeschlossenen Transfers: Haltedauer, Aufschlag auf den Marktwert am Kauftag, Anteil der Käufe in einen steigenden Marktwert und die Lieblingsklubs - dazu das Aktivitätsfenster über den Tag. Zu jeder Kennzahl steht, auf wie vielen Transfers sie beruht; ohne Datenlage steht kein Wert, sondern 'keine Datenlage'. Rundläufe sind Spieler, die binnen einer Stunde wieder verkauft wurden - Bonus-Farming, und der Grund für sehr kurze Haltedauern. Die Daten schreibt die Stage 'manager_profiles' am Ende eines Scrape-Laufs."/></Typography>
-              <ManagerDossier />
-            </Paper>
+            <TabShell name="manager" timestamps={timestamps} manifest={run_manifest}>
+              {/* "Manager" related components */}
+              <Paper sx={{ marginTop: "25px"}} elevation={5}>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Manager-Dossier <HelpIcon text="Pro Manager vier Kennzahlen aus den abgeschlossenen Transfers: Haltedauer, Aufschlag auf den Marktwert am Kauftag, Anteil der Käufe in einen steigenden Marktwert und die Lieblingsklubs - dazu das Aktivitätsfenster über den Tag. Zu jeder Kennzahl steht, auf wie vielen Transfers sie beruht; ohne Datenlage steht kein Wert, sondern 'keine Datenlage'. Rundläufe sind Spieler, die binnen einer Stunde wieder verkauft wurden - Bonus-Farming, und der Grund für sehr kurze Haltedauern. Die Daten schreibt die Stage 'manager_profiles' am Ende eines Scrape-Laufs."/></Typography>
+                <ManagerDossier />
+              </Paper>
+            </TabShell>
           </TabPanel>
 
           <TabPanel sx={{ padding: 0 }} value="6">
@@ -298,13 +341,16 @@ function App() {
                   run ended, not that it produced anything. */}
               <Typography variant="h6" sx={{ padding: "0px 15px 0px 15px" }}>Letzter Lauf</Typography>
               <Typography variant="body1" sx={{ padding: "0px 15px 15px 15px" }}>
-                Lauf: <Typography variant="button" style={{ opacity: "0.7" }}>{run_manifest.runId || "unbekannt"}</Typography><br/>
+                Lauf: <Typography variant="button" style={{ opacity: "0.7" }}>{run_manifest?.runId || "unbekannt"}</Typography><br/>
                 Ergebnis: <Typography variant="button" style={{ color: statusColour(runStatus(run_manifest)) }}>{runSummary(run_manifest)}</Typography><br/>
-                Beendet: <Typography variant="button" style={{ opacity: "0.7" }}>{new Date(timestamp_main.time).toLocaleString("de-DE")}</Typography>
+                Beendet: <Typography variant="button" style={{ opacity: "0.7" }}>{formatMoment(timestamp_main.time)}</Typography>
+                {/* The index is polled, so this is the one place that can say whether the
+                    page is still in touch with the backend at all */}
+                {refresh.error && <><br/>Zeitstempel: <Typography variant="button" style={{ color: "red" }}>{refresh.error}</Typography></>}
               </Typography>
 
               <Typography variant="body1" component="div" sx={{ padding: "0px 15px 15px 15px" }}>
-                {(run_manifest.stages || []).map((stage) => (
+                {(run_manifest?.stages || []).map((stage) => (
                   <div key={stage.name}>
                     <Typography variant="button" style={{ color: statusColour(stage.status === "ok" ? "current" : "failed") }}>
                       {stage.status === "ok" ? "✓" : "✗"} {stage.name}
@@ -327,18 +373,19 @@ function App() {
                   still looks perfectly reasonable. */}
               <Typography variant="h6" sx={{ padding: "0px 15px 0px 15px" }}>Timestamps</Typography>
               <Typography variant="body1" component="div" sx={{ padding: "0px 15px 15px 15px" }}>
-                {DATASETS.map(([name, label, stamp]) => {
+                {DATASETS.map(([name, label]) => {
+                  const stamp = timestamps[name]
                   const status = datasetStatus(stamp, run_manifest, name)
 
                   return (
                     <div key={name}>
                       {label}: <Typography variant="button" style={{ color: statusColour(status), opacity: "0.7" }}>
-                        {new Date(stamp.time).toLocaleString("de-DE")}
+                        {formatMoment(stamp?.time)}
                       </Typography>
                       <Typography variant="button" style={{ color: statusColour(status), marginLeft: "8px" }}>
                         {statusLabel(status)}
                       </Typography>
-                      {stamp.rows !== undefined && (
+                      {stamp?.rows !== undefined && (
                         <Typography variant="button" style={{ opacity: "0.5", marginLeft: "8px" }}>
                           {stamp.rows} Zeilen
                         </Typography>
@@ -368,6 +415,7 @@ function App() {
 
       </Box>
     </ThemeProvider>
+    </DataRefreshContext.Provider>
   )
 }
 

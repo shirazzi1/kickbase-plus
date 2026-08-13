@@ -1,20 +1,21 @@
 import { render, screen } from "@testing-library/react"
 
-// The data files are written by the scraper at runtime, so the test brings its own, the way
-// the market table test does.
+// The data files are written by the scraper at runtime, so the test brings its own. The meter
+// fetches them in the app; here they come in as props, which is the seam the component keeps for
+// exactly this - nothing is requested when a caller brings its own data.
 
 // A window that is open at any "now": the meter then classifies by points, which is the
 // only interesting phase.
-jest.mock("../data/match_days.json", () => ([
+const MATCH_DAYS = [
     { day: 7, firstMatch: "2020-01-01T00:00:00Z", lastMatch: "2999-01-01T00:00:00Z" }
-]))
+]
 
-jest.mock("../data/timestamps/ts_live_points.json", () => ({ time: "2020-01-01T00:00:00Z" }))
+const LIVE_POINTS_STAMP = { time: "2020-01-01T00:00:00Z" }
 
 // Five managers. "Ich", "Max" and "Zoe" carry the small three-man squads of the first
 // scenario; "Aaron" and "Bea" the second one, where a full squad has played its eleven and
 // only the bench is left open.
-jest.mock("../data/taken_players.json", () => ([
+const TAKEN_PLAYERS = [
     ...Array.from({ length: 13 }, (unused, index) => ({
         owner: "Aaron", playerId: `a${index}`, firstName: "Aaron", lastName: `Spieler ${index}`,
         position: "MF", status: 0
@@ -28,9 +29,19 @@ jest.mock("../data/taken_players.json", () => ([
     { owner: "Zoe", playerId: "6", firstName: "Sven", lastName: "Ulreich", position: "TW", status: 0 },
     { owner: "Zoe", playerId: "7", firstName: "Leon", lastName: "Goretzka", position: "MF", status: 0 },
     { owner: "Zoe", playerId: "8", firstName: "Kingsley", lastName: "Coman", position: "ST", status: 0 }
-]))
+]
 
 const SwingMeter = require("./SwingMeter").default
+
+// The squads, the kickoff window and the age of the live snapshot, in one place
+const show = (entries) => render(
+    <SwingMeter
+        entries={entries}
+        takenPlayers={TAKEN_PLAYERS}
+        matchDays={MATCH_DAYS}
+        livePointsStamp={LIVE_POINTS_STAMP}
+    />
+)
 
 // Five players have scored 100 points between them, so one player is worth 20
 const entries = [
@@ -45,7 +56,7 @@ const entries = [
 
 describe("SwingMeter", () => {
     // Managers are sorted, so "Ich" is the own team and "Max" the first available rival
-    beforeEach(() => render(<SwingMeter entries={entries} />))
+    beforeEach(() => show(entries))
 
     it("names the gap and what is still playing", () => {
         expect(screen.getByText("Du liegst 25 Punkte hinter Max – 2 deiner Spieler spielen noch, 1 bei Max"))
@@ -103,7 +114,7 @@ describe("SwingMeter mit Kader über elf Spielern", () => {
         { userId: "11", userName: "Bea", livePoints: 30, totalPoints: 400, players: [{ playerId: "b1", points: 30, fullName: "Bea Spieler 1" }] }
     ]
 
-    beforeEach(() => render(<SwingMeter entries={benchEntries} />))
+    beforeEach(() => show(benchEntries))
 
     it("does not promise open players the lineup has no room for", () => {
         expect(screen.getByText("Du liegst 25 Punkte vor Bea – kein Spieler kann noch punkten")).toBeTruthy()

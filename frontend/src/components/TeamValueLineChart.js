@@ -4,9 +4,19 @@ import Paper from '@mui/material/Paper'
 
 import { nivoDarkTheme, nivoLightTheme } from './SharedConstants'
 
-import data from '../data/team_values.json'
+import { useJsonData } from "../hooks/useJsonData"
+import { dataGate } from "./DataState"
+
+const DATASET = "team_values.json"
 
 function TeamValueLineChart(props) {
+    const { status, data, missing, error, reload } = useJsonData(DATASET)
+
+    const gate = dataGate({ name: DATASET, status, error, missing, reload })
+
+    if (gate)
+        return gate
+
     var processedData = []
 
     for (var user in data) {
