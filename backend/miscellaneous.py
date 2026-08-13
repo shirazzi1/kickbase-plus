@@ -899,6 +899,48 @@ def write_json_to_file(data, file_name: str) -> None:
         logging.error(f"Failed to write JSON to {file_path}: {e}")
 
 
+def patch_market_bid(player_id: str, own_bid) -> bool:
+    """### Write a confirmed bid into the market.json row it belongs to.
+
+    The frontend imports market.json at build time, so a bid placed through the API is
+    invisible until the next scrape. Patching the row bridges that gap, and survives a
+    page reload the way a value held only in React state would not.
+
+    This can race a main.py run writing the same file. The writes in this project are
+    not atomic - an open item in docs/improvement-plan-2026-08-12.md, cluster B - and
+    the next scrape repairs the row either way, so the race is accepted rather than
+    solved here.
+
+    Args:
+        player_id (str): The player whose row is patched.
+        own_bid: The confirmed bid, or None when it was withdrawn.
+
+    Returns:
+        bool: True when a row matched and the file was rewritten.
+    """
+    market_path = path.join(DATA_DIR, "market.json")
+
+    if not path.exists(market_path):
+        logging.warning(f"{market_path} does not exist yet, so no bid was patched into it.")
+        return False
+
+    try:
+        with open(market_path, "r") as f:
+            rows = json.load(f)
+    except json.JSONDecodeError:
+        logging.warning(f"{market_path} is empty or invalid, so no bid was patched into it.")
+        return False
+
+    for row in rows:
+        if str(row.get("playerId")) == str(player_id):
+            row["ownBid"] = own_bid
+            write_json_to_file(rows, "market.json")
+            return True
+
+    logging.warning(f"No market.json row for player {player_id}, so no bid was patched in.")
+    return False
+
+
 def julian_to_date(julian_date: int) -> str:
     """Convert a Julian date to a standard date format (YYYY-MM-DD)."""
     reference_date = datetime(1970, 1, 1)

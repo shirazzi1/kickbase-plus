@@ -1,11 +1,11 @@
 import logging
 
 from os import getenv
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 
 import main
-from backend import exceptions
+from backend import exceptions, miscellaneous
 from backend.kickbase.v4 import leagues, user
 
 ### ===============================================================================
@@ -56,6 +56,131 @@ def get_live_points():
 
     ### Return the live points
     return jsonify(final_live_points)
+
+
+def _connect():
+    """### Log in and pick the league the frontend shows.
+
+    The league is resolved here rather than taken from the request: a league id from the
+    browser would be a league id we did not check.
+
+    Returns:
+        tuple: (user_info, user_token, selected_league).
+
+    Raises:
+        exceptions.LoginException: If the login fails.
+        exceptions.KickbaseException: If the account is in no league.
+    """
+    user_info, user_token = user.login(kb_mail, kb_password, discord_webhook)
+
+    league_list = leagues.get_league_list(user_token)
+    if not league_list:
+        raise exceptions.KickbaseException("No leagues found for this Kickbase account.")
+
+    return user_info, user_token, main.select_league(league_list)
+
+
+def _listing(user_token: str, league_id: str, player_id: str):
+    """### The market entry for one player, or None if they are not listed.
+
+    Fetched fresh every time: get_market() is not cached, which is what makes this
+    usable both to check before a write and to read the result back after one.
+    """
+    for listing in leagues.get_market(user_token, league_id):
+        if str(listing.id) == str(player_id):
+            return listing
+
+    return None
+
+
+@app.route("/api/market/<player_id>/bid", methods=["POST"])
+def place_bid(player_id):
+    """### Places a bid on a player on the transfer market.
+
+    Answers with the bid Kickbase confirms rather than the one that was sent, so a
+    silently clamped or rounded bid is not displayed as the typed value.
+    """
+    payload = request.get_json(silent=True) or {}
+    price = payload.get("price")
+
+    ### bool is an int in Python, and True would otherwise pass as a price of 1
+    if isinstance(price, bool) or not isinstance(price, int) or price <= 0:
+        return jsonify({"error": "Das Gebot muss eine positive ganze Zahl sein."}), 400
+
+    logging.info(f"Flask API: Placing a bid of {price} on player {player_id}...")
+
+    try:
+        user_info, user_token, selected_league = _connect()
+
+        listing = _listing(user_token, selected_league.id, player_id)
+        if listing is None:
+            return jsonify({"error": "Dieser Spieler steht nicht auf dem Transfermarkt."}), 404
+
+        ### Nobody bids on their own listing. Checked here as well as in the frontend,
+        ### because a check only in the browser is not a check.
+        if listing.userId is not None and str(listing.userId) == str(user_info.id):
+            return jsonify({"error": "Auf ein eigenes Angebot kannst du nicht bieten."}), 409
+
+        leagues.place_offer(user_token, selected_league.id, player_id, price)
+
+        ### Read back what Kickbase recorded, rather than trusting what we sent
+        confirmed = _listing(user_token, selected_league.id, player_id)
+        own_bid = confirmed.own_offer(user_info.id) if confirmed else None
+
+        miscellaneous.patch_market_bid(player_id, own_bid)
+    except exceptions.KickbaseWriteException as e:
+        logging.error(f"Flask API: Kickbase rejected the bid: {e}")
+        return jsonify({"error": str(e)}), e.status
+    except exceptions.LoginException as e:
+        logging.error(f"Flask API: {e}")
+        return jsonify({"error": "Login bei Kickbase fehlgeschlagen. Bitte Zugangsdaten prüfen."}), 502
+    except exceptions.KickbaseException as e:
+        logging.error(f"Flask API: {e}")
+        return jsonify({"error": "Kickbase konnte das Gebot nicht verarbeiten."}), 502
+
+    logging.info(f"Flask API: Bid on player {player_id} is now {own_bid}.")
+
+    return jsonify({"ownBid": own_bid})
+
+
+@app.route("/api/market/<player_id>/bid", methods=["DELETE"])
+def withdraw_bid(player_id):
+    """### Withdraws the user's own bid on a player.
+
+    The offer is looked up in a fresh market read rather than from an id the frontend
+    remembered: an id written into market.json hours ago would be stale, and the
+    recorded response carries none in the first place.
+    """
+    logging.info(f"Flask API: Withdrawing the bid on player {player_id}...")
+
+    try:
+        user_info, user_token, selected_league = _connect()
+
+        listing = _listing(user_token, selected_league.id, player_id)
+        if listing is None:
+            return jsonify({"error": "Dieser Spieler steht nicht auf dem Transfermarkt."}), 404
+
+        if listing.own_offer(user_info.id) is None:
+            return jsonify({"error": "Auf diesen Spieler hast du kein Gebot abgegeben."}), 409
+
+        ### The user's own id is the offer's identifier - Kickbase exposes no offer id
+        leagues.remove_offer(user_token, selected_league.id, player_id, user_info.id)
+
+        miscellaneous.patch_market_bid(player_id, None)
+    except exceptions.KickbaseWriteException as e:
+        logging.error(f"Flask API: Kickbase rejected the withdrawal: {e}")
+        return jsonify({"error": str(e)}), e.status
+    except exceptions.LoginException as e:
+        logging.error(f"Flask API: {e}")
+        return jsonify({"error": "Login bei Kickbase fehlgeschlagen. Bitte Zugangsdaten prüfen."}), 502
+    except exceptions.KickbaseException as e:
+        logging.error(f"Flask API: {e}")
+        return jsonify({"error": "Kickbase konnte das Gebot nicht zurückziehen."}), 502
+
+    logging.info(f"Flask API: Bid on player {player_id} withdrawn.")
+
+    return jsonify({"ownBid": None})
+
 
 if __name__ == "__main__":
     app.run()

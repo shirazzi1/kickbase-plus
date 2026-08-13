@@ -355,6 +355,217 @@ def test_own_offer_is_none_without_any_offer():
 
 
 ### ===============================================================================
+### patch_market_bid()
+### ===============================================================================
+
+
+def with_market_file(rows, fn):
+    """Run fn with DATA_DIR pointed at a temporary market.json, and return its rows."""
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = path.join(tmp, "data")
+        ts_dir = path.join(data_dir, "timestamps")
+        from os import makedirs
+        makedirs(ts_dir, exist_ok=True)
+
+        with open(path.join(data_dir, "market.json"), "w") as f:
+            json.dump(rows, f)
+
+        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR)
+        miscellaneous.DATA_DIR = data_dir
+        miscellaneous.TIMESTAMP_DIR = ts_dir
+        try:
+            result = fn()
+            with open(path.join(data_dir, "market.json")) as f:
+                return result, json.load(f)
+        finally:
+            miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR = original
+
+
+def market_rows():
+    return [
+        {"playerId": "8289", "lastName": "Musah", "ownBid": None, "marketValue": 5000000},
+        {"playerId": "3754", "lastName": "Boey", "ownBid": 523350, "marketValue": 500000},
+    ]
+
+
+def test_patch_writes_the_confirmed_bid():
+    result, rows = with_market_file(market_rows(), lambda:
+        miscellaneous.patch_market_bid("8289", 5200000))
+
+    assert result is True, "expected the patch to report success"
+    assert rows[0]["ownBid"] == 5200000, f"expected the bid written, got {rows[0]}"
+
+
+def test_patch_clears_a_withdrawn_bid():
+    result, rows = with_market_file(market_rows(), lambda:
+        miscellaneous.patch_market_bid("3754", None))
+
+    assert result is True
+    assert rows[1]["ownBid"] is None, f"expected the bid cleared, got {rows[1]}"
+
+
+def test_patch_leaves_other_rows_alone():
+    _, rows = with_market_file(market_rows(), lambda:
+        miscellaneous.patch_market_bid("8289", 5200000))
+    assert rows[1]["ownBid"] == 523350, f"expected Boey untouched, got {rows[1]}"
+
+
+def test_patch_of_an_unknown_player_changes_nothing():
+    result, rows = with_market_file(market_rows(), lambda:
+        miscellaneous.patch_market_bid("999999", 1))
+
+    assert result is False, "expected the patch to report that nothing matched"
+    assert rows == market_rows(), f"expected the file untouched, got {rows}"
+
+
+def test_patch_survives_a_missing_file():
+    """app.py can serve a request before main.py ever ran."""
+    with tempfile.TemporaryDirectory() as tmp:
+        original = miscellaneous.DATA_DIR
+        miscellaneous.DATA_DIR = path.join(tmp, "data")
+        try:
+            assert miscellaneous.patch_market_bid("8289", 1) is False
+        finally:
+            miscellaneous.DATA_DIR = original
+
+
+### ===============================================================================
+### The endpoints
+### ===============================================================================
+
+
+def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID):
+    """A Flask test client with login, market and the write calls faked out."""
+    import app as flask_app
+    import main
+
+    class FakeUser:
+        id = own_user_id
+        name = "shirazzi"
+
+    class FakeLeague:
+        id = LEAGUE_ID
+        name = "Test"
+
+    original = (flask_app.user.login, flask_app.leagues.get_league_list,
+                flask_app.leagues.get_market, flask_app.leagues.place_offer,
+                flask_app.leagues.remove_offer, main.select_league)
+
+    flask_app.user.login = lambda *a, **k: (FakeUser(), "tok")
+    flask_app.leagues.get_league_list = lambda token: [FakeLeague()]
+    main.select_league = lambda league_list: FakeLeague()
+    flask_app.leagues.get_market = lambda token, lid: [Market_Players(i) for i in market()]
+    flask_app.leagues.place_offer = place or (lambda *a, **k: {})
+    flask_app.leagues.remove_offer = remove or (lambda *a, **k: None)
+
+    flask_app.app.config["TESTING"] = True
+    return flask_app.app.test_client(), original
+
+
+def restore(original):
+    import app as flask_app
+    import main
+    (flask_app.user.login, flask_app.leagues.get_league_list, flask_app.leagues.get_market,
+     flask_app.leagues.place_offer, flask_app.leagues.remove_offer,
+     main.select_league) = original
+
+
+def post_bid(market, price, place=None):
+    """POST a bid and return (status, body)."""
+    client, original = client_with(market, place=place)
+    try:
+        response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": price})
+        return response.status_code, response.get_json()
+    finally:
+        restore(original)
+
+
+def plain_market():
+    return [market_item()]
+
+
+def bid_market():
+    return [market_item(ofs=[{"i": "77", "u": OWN_USER_ID, "uoid": OWN_USER_ID,
+                              "uop": 5200000}])]
+
+
+def test_post_rejects_a_non_positive_price():
+    status, body = post_bid(plain_market, 0)
+    assert status == 400, f"expected 400, got {status} {body}"
+    assert "error" in body and body["error"], f"expected a German message, got {body}"
+
+
+def test_post_rejects_a_non_integer_price():
+    status, body = post_bid(plain_market, "viel")
+    assert status == 400, f"expected 400, got {status} {body}"
+
+
+def test_post_rejects_a_player_not_on_the_market():
+    client, original = client_with(plain_market)
+    try:
+        response = client.post("/api/market/999999/bid", json={"price": 1180000})
+        assert response.status_code == 404, \
+            f"expected 404, got {response.status_code} {response.get_json()}"
+    finally:
+        restore(original)
+
+
+def test_post_refuses_an_own_listing():
+    """Nobody bids on their own player, and the server must not rely on the browser."""
+    def own_listing():
+        return [market_item(u={"i": OWN_USER_ID, "n": "shirazzi"})]
+
+    status, body = post_bid(own_listing, 1180000)
+    assert status == 409, f"expected 409, got {status} {body}"
+
+
+def test_post_returns_the_bid_read_back_from_kickbase():
+    """Not the typed value: a silently clamped bid would otherwise be shown as typed."""
+    calls = []
+    status, body = post_bid(bid_market, 1180000,
+                            place=lambda *a, **k: calls.append(a) or {})
+    assert status == 200, f"expected 200, got {status} {body}"
+    ### The faked market reports 5.200.000 regardless of what was sent
+    assert body == {"ownBid": 5200000}, f"expected the read-back bid, got {body}"
+    assert calls, "expected place_offer to have been called"
+
+
+def test_post_passes_the_kickbase_rejection_through():
+    def rejecting(*a, **k):
+        raise exceptions.KickbaseWriteException(400, "Offer price is below the market value")
+
+    status, body = post_bid(plain_market, 1, place=rejecting)
+    assert status == 400, f"expected the API status passed through, got {status}"
+    assert "below the market value" in body["error"], \
+        f"expected the API message passed through, got {body}"
+
+
+def test_delete_withdraws_and_reports_no_bid():
+    removed = []
+    client, original = client_with(
+        bid_market, remove=lambda *a, **k: removed.append(a))
+    try:
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid")
+        assert response.status_code == 200, \
+            f"expected 200, got {response.status_code} {response.get_json()}"
+        assert response.get_json() == {"ownBid": None}, \
+            f"expected a cleared bid, got {response.get_json()}"
+        assert removed, "expected remove_offer to have been called"
+    finally:
+        restore(original)
+
+
+def test_delete_without_a_bid_is_a_conflict():
+    client, original = client_with(plain_market)
+    try:
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid")
+        assert response.status_code == 409, \
+            f"expected 409, got {response.status_code} {response.get_json()}"
+    finally:
+        restore(original)
+
+
+### ===============================================================================
 
 if __name__ == "__main__":
     print("place_offer()")
@@ -382,6 +593,26 @@ if __name__ == "__main__":
     check("reads the top level mirror", test_own_offer_reads_the_top_level_mirror)
     check("ignores a foreign offer", test_own_offer_ignores_a_foreign_offer)
     check("is none without any offer", test_own_offer_is_none_without_any_offer)
+
+    print("\npatch_market_bid()")
+    check("writes the confirmed bid", test_patch_writes_the_confirmed_bid)
+    check("clears a withdrawn bid", test_patch_clears_a_withdrawn_bid)
+    check("leaves other rows alone", test_patch_leaves_other_rows_alone)
+    check("changes nothing for an unknown player", test_patch_of_an_unknown_player_changes_nothing)
+    check("survives a missing file", test_patch_survives_a_missing_file)
+
+    print("\nPOST /api/market/<id>/bid")
+    check("rejects a non positive price", test_post_rejects_a_non_positive_price)
+    check("rejects a non integer price", test_post_rejects_a_non_integer_price)
+    check("rejects a player not on the market", test_post_rejects_a_player_not_on_the_market)
+    check("refuses an own listing", test_post_refuses_an_own_listing)
+    check("returns the bid read back from Kickbase",
+          test_post_returns_the_bid_read_back_from_kickbase)
+    check("passes the Kickbase rejection through", test_post_passes_the_kickbase_rejection_through)
+
+    print("\nDELETE /api/market/<id>/bid")
+    check("withdraws and reports no bid", test_delete_withdraws_and_reports_no_bid)
+    check("is a conflict without a bid", test_delete_without_a_bid_is_a_conflict)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")
