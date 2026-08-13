@@ -6,7 +6,6 @@ import {
     coverageNote,
     isRising,
     likelyBidders,
-    loadManagerProfiles,
     managerProfileList
 } from "./managerProfiles"
 
@@ -25,14 +24,10 @@ const profile = (overrides) => ({
 
 const dortmundListing = { playerId: "49", teamId: "5", price: 10000000, sevenDaysAvg: null, today: null }
 
-describe("loadManagerProfiles", () => {
-    it("returns null where the file cannot be asked for", () => {
-        // Jest has no webpack, so there is no require.context to build the optional import
-        // from. Both consumers therefore take their profiles as a prop, and this is what the
-        // default hands them when the scrape has not written the file.
-        expect(loadManagerProfiles()).toBeNull()
-    })
-})
+// loadManagerProfiles() and its test are gone with the require.context they existed for: the
+// consumers fetch manager_profiles.json now, and a file the scrape has not written is a 404
+// the hook turns into an empty document. What that looks like on the page is asserted in
+// ManagerDossier.test.js and MarketTable.test.js.
 
 describe("managerProfileList", () => {
     it("sorts the managers by name", () => {

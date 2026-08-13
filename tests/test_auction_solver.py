@@ -86,10 +86,12 @@ def run_market():
         ts_dir = path.join(data_dir, "timestamps")
         makedirs(ts_dir, exist_ok=True)
 
-        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        original = (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+                    miscellaneous.TIMESTAMP_DIR,
                     miscellaneous.LAST_GOOD_DIR,
                     leagues.get_market, leagues.player_statistics, leagues.player_marketvalue)
-        miscellaneous.DATA_DIR = data_dir
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
 
@@ -108,7 +110,8 @@ def run_market():
             with open(path.join(data_dir, "market.json")) as f:
                 rows = json.load(f)
         finally:
-            (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR, miscellaneous.LAST_GOOD_DIR,
+            (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+             miscellaneous.TIMESTAMP_DIR, miscellaneous.LAST_GOOD_DIR,
              leagues.get_market, leagues.player_statistics,
              leagues.player_marketvalue) = original
 
@@ -157,13 +160,16 @@ def run_balances(own_user_id=OWN_USER_ID):
         with open(path.join(data_dir, "STATIC_users.json"), "w") as f:
             json.dump(league_users, f)
 
-        original = (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        original = (main.PUBLIC_DIR, main.STATE_DIR,
+                    miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
                     miscellaneous.LAST_GOOD_DIR, miscellaneous.prefetch_profilepics,
                     miscellaneous.get_profilepic, leagues.transfers, leagues.user_stats,
                     leagues.user_performance, environ.get("START_DATE"),
                     environ.get("START_MONEY"))
-        main.DATA_DIR = data_dir
-        miscellaneous.DATA_DIR = data_dir
+        main.PUBLIC_DIR = data_dir
+        main.STATE_DIR = data_dir
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
 
@@ -187,7 +193,8 @@ def run_balances(own_user_id=OWN_USER_ID):
             with open(path.join(data_dir, "balances.json")) as f:
                 rows = json.load(f)
         finally:
-            (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+            (main.PUBLIC_DIR, main.STATE_DIR,
+             miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
              miscellaneous.LAST_GOOD_DIR, miscellaneous.prefetch_profilepics,
              miscellaneous.get_profilepic, leagues.transfers, leagues.user_stats,
              leagues.user_performance, start_date, start_money) = original

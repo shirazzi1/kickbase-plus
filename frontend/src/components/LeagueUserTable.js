@@ -2,21 +2,30 @@ import PagedDataGrid from "./PagedDataGrid"
 import { currencyFormatter } from "./SharedConstants"
 import Avatar from "@mui/material/Avatar"
 
-// Import data
-import data from "../data/league_user_stats.json"
+import { useJsonData } from "../hooks/useJsonData"
+import { dataGate } from "./DataState"
 
-////// Calculate the difference in points between the users
-// Sort the data by points in descending order
-data.sort((a, b) => b.points - a.points);
-// Calculate the difference in points
-for (let i = 1; i < data.length; i++) {
-    data[i].pointsDiff = data[i - 1].points - data[i].points;
+const DATASET = "league_user_stats.json"
+
+/**
+ * The gap to the manager above, per manager.
+ *
+ * This used to run at module scope, sorting the imported array in place and then writing
+ * `data[0].pointsDiff` - which threw on an empty file and mutated a module other components
+ * import. Fetching makes the empty case the normal first state, so it is a function over a
+ * copy now.
+ */
+export function withPointsDiff(rows) {
+    const sorted = [...(rows || [])].sort((a, b) => b.points - a.points)
+
+    return sorted.map((row, i) => ({
+        ...row,
+        pointsDiff: i === 0 ? 0 : sorted[i - 1].points - row.points
+    }))
 }
-// Set the pointsDiff for the first user to 0
-data[0].pointsDiff = 0;
-
 
 function LeagueUserTable() {
+    const { status, data, missing, error, reload } = useJsonData(DATASET)
     // Define the columns of the table
     const columns = [
         {
@@ -90,8 +99,15 @@ function LeagueUserTable() {
     //     },
     ]
 
+    // Every hook above this line: the gate returns early, and the rules of hooks do
+    // not allow that before the last of them has run.
+    const gate = dataGate({ name: DATASET, status, error, missing, reload })
+
+    if (gate)
+        return gate
+
     // Fill the rows with the players attributes from the JSON file
-    const rows = data.map((row, i) => (
+    const rows = withPointsDiff(data).map((row, i) => (
         {
             id: i,
             user: row.userName,

@@ -76,17 +76,17 @@ class TempStore:
         self.state_path = path.join(root, "state", "events-state.json")
         makedirs(self.data_dir, exist_ok=True)
 
-        self.original = (miscellaneous.HISTORY_DIR, events.DATA_DIR, events.EVENTS_STATE_PATH)
+        self.original = (miscellaneous.HISTORY_DIR, events.STATE_DIR, events.EVENTS_STATE_PATH)
         ### The writer's path builder is what the reader goes through, so patching it here is
         ### what redirects the reads
         miscellaneous.HISTORY_DIR = self.history_dir
-        events.DATA_DIR = self.data_dir
+        events.STATE_DIR = self.data_dir
         events.EVENTS_STATE_PATH = self.state_path
 
         return self
 
     def __exit__(self, *exc):
-        (miscellaneous.HISTORY_DIR, events.DATA_DIR,
+        (miscellaneous.HISTORY_DIR, events.STATE_DIR,
          events.EVENTS_STATE_PATH) = self.original
         self.tmp.cleanup()
         return False

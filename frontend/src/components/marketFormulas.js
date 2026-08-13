@@ -1,6 +1,16 @@
 // The arithmetic behind the derived transfer market columns, kept apart from the table
 // so the edge cases (no history, falling market value, free agents) can be tested.
 
+// The horizons the break-even columns are computed over, written by a run into config.json
+// from BEP_GROWTH_DAYS/BEP_TARGET_DAYS. Fetched at runtime like every other dataset since
+// this phase, so both readers - the table and App's help text - need the same name for it.
+export const CONFIG_DATASET = "config.json"
+
+// What to show before the file has arrived, and on a deployment whose first run has not
+// written it. The same numbers backend/miscellaneous.py falls back to, so a help text
+// rendered during loading does not name a horizon nobody configured.
+export const BEP_DEFAULTS = { bepGrowthDays: 3, bepTargetDays: 3 }
+
 const isMissing = (value) => value === null || value === undefined
 
 /**

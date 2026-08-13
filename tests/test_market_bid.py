@@ -440,7 +440,7 @@ def test_own_offer_is_none_without_any_offer():
 
 
 def with_market_file(rows, fn):
-    """Run fn with DATA_DIR pointed at a temporary market.json, and return its rows."""
+    """Run fn with PUBLIC_DIR pointed at a temporary market.json, and return its rows."""
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = path.join(tmp, "data")
         ts_dir = path.join(data_dir, "timestamps")
@@ -450,15 +450,16 @@ def with_market_file(rows, fn):
         with open(path.join(data_dir, "market.json"), "w") as f:
             json.dump(rows, f)
 
-        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR)
-        miscellaneous.DATA_DIR = data_dir
+        original = (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR)
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         try:
             result = fn()
             with open(path.join(data_dir, "market.json")) as f:
                 return result, json.load(f)
         finally:
-            miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR = original
+            miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR = original
 
 
 def market_rows():
@@ -501,12 +502,13 @@ def test_patch_of_an_unknown_player_changes_nothing():
 def test_patch_survives_a_missing_file():
     """app.py can serve a request before main.py ever ran."""
     with tempfile.TemporaryDirectory() as tmp:
-        original = miscellaneous.DATA_DIR
-        miscellaneous.DATA_DIR = path.join(tmp, "data")
+        original = miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR
+        miscellaneous.PUBLIC_DIR = path.join(tmp, "data")
+        miscellaneous.STATE_DIR = path.join(tmp, "data")
         try:
             assert miscellaneous.patch_market_bid("8289", 1) is False
         finally:
-            miscellaneous.DATA_DIR = original
+            miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR = original
 
 
 def test_patch_survives_an_unreadable_file():
@@ -526,8 +528,9 @@ def test_patch_survives_an_unreadable_file():
         with open(path.join(data_dir, "market.json"), "w") as f:
             json.dump(market_rows(), f)
 
-        original_data_dir = miscellaneous.DATA_DIR
-        miscellaneous.DATA_DIR = data_dir
+        original_data_dir = miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
         ### Injected as a module global so it shadows the builtin only inside
         ### miscellaneous.py, without touching open() anywhere else in the process.
         miscellaneous.open = raise_permission_denied
@@ -535,7 +538,7 @@ def test_patch_survives_an_unreadable_file():
             assert miscellaneous.patch_market_bid("8289", 1) is False
         finally:
             del miscellaneous.open
-            miscellaneous.DATA_DIR = original_data_dir
+            miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR = original_data_dir
 
 
 def test_patch_propagates_a_write_failure_rather_than_swallowing_it():
@@ -562,8 +565,9 @@ def test_patch_propagates_a_write_failure_rather_than_swallowing_it():
             with open(path.join(data_dir, "market.json"), "w") as f:
                 json.dump(market_rows(), f)
 
-            original_data_dir = miscellaneous.DATA_DIR
-            miscellaneous.DATA_DIR = data_dir
+            original_data_dir = miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR
+            miscellaneous.PUBLIC_DIR = data_dir
+            miscellaneous.STATE_DIR = data_dir
             try:
                 try:
                     miscellaneous.patch_market_bid("8289", 1)
@@ -573,7 +577,7 @@ def test_patch_propagates_a_write_failure_rather_than_swallowing_it():
                     raise AssertionError(
                         "expected the write failure to propagate rather than return False")
             finally:
-                miscellaneous.DATA_DIR = original_data_dir
+                miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR = original_data_dir
     finally:
         miscellaneous.write_json_to_file = original_write
 
@@ -611,7 +615,7 @@ def bid_headers():
 def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID, market_rows=None):
     """A Flask test client with login, market, the write calls and market.json faked out.
 
-    DATA_DIR/TIMESTAMP_DIR are redirected to a private temporary directory seeded with
+    PUBLIC_DIR/TIMESTAMP_DIR are redirected to a private temporary directory seeded with
     market_rows (a row for PLAYER_ID by default), so a call that reaches
     patch_market_bid() patches that copy rather than the real
     frontend/src/data/market.json. restore() removes it again.
@@ -642,7 +646,7 @@ def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID, market
     original = (flask_app.user.login, flask_app.leagues.get_league_list,
                 flask_app.leagues.get_market, flask_app.leagues.place_offer,
                 flask_app.leagues.remove_offer, main.select_league,
-                miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR, flask_app.bid_token,
+                miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR, flask_app.bid_token,
                 tmp_root)
 
     flask_app.user.login = lambda *a, **k: (FakeUser(), "tok")
@@ -651,7 +655,8 @@ def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID, market
     flask_app.leagues.get_market = lambda token, lid: [Market_Players(i) for i in market()]
     flask_app.leagues.place_offer = place or (lambda *a, **k: {})
     flask_app.leagues.remove_offer = remove or (lambda *a, **k: None)
-    miscellaneous.DATA_DIR = data_dir
+    miscellaneous.PUBLIC_DIR = data_dir
+    miscellaneous.STATE_DIR = data_dir
     miscellaneous.TIMESTAMP_DIR = ts_dir
     flask_app.bid_token = TEST_BID_TOKEN
 
@@ -663,13 +668,13 @@ def restore(original):
     """Undo client_with()'s patching and remove its temporary data directory.
 
     Always call this in a finally block: a test that raises mid-way must not leave
-    miscellaneous.DATA_DIR pointing at a temporary directory that no longer exists.
+    the data directories pointing at a temporary directory that no longer exists.
     """
     import app as flask_app
     import main
     (flask_app.user.login, flask_app.leagues.get_league_list, flask_app.leagues.get_market,
      flask_app.leagues.place_offer, flask_app.leagues.remove_offer,
-     main.select_league, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+     main.select_league, miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
      flask_app.bid_token, tmp_root) = original
     shutil.rmtree(tmp_root, ignore_errors=True)
 
@@ -1072,29 +1077,60 @@ def test_delete_with_the_wrong_token_is_unauthorized():
         restore(original)
 
 
-def test_bid_token_unset_refuses_every_request_even_with_a_token():
-    """Fail closed: an unset BID_TOKEN blocks every request rather than skipping the check.
+def test_an_unset_bid_token_no_longer_blocks_bidding():
+    """BID_TOKEN used to be the only token, so an unset one had to fail closed with a 503.
 
-    Otherwise unsetting the env var (e.g. a misconfigured deploy) would silently turn
-    the check off instead of tightening it. This is a server misconfiguration rather
-    than a failed authentication, so it answers 503, not 401 - see
-    test_wrong_token_is_401_while_unset_is_503 for why the two must stay distinct.
+    It is not the only one any more. app.py generates a token per start and hands it to the
+    browser as a cookie with index.html, because the carrier BID_TOKEN used to have - the CRA
+    dev server's proxy - does not run in a container any more. There is therefore no
+    "unconfigured" state left: a request carrying the boot token works with BID_TOKEN unset,
+    and one carrying anything else is the caller's mistake and stays 401.
     """
     import app as flask_app
 
-    client, original, _ = client_with(plain_market)
+    client, original, _ = client_with(bid_market)
     previous_token = flask_app.bid_token
     flask_app.bid_token = None
     try:
-        response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
-                                headers={"X-Bid-Token": "any-token-at-all"})
-        assert response.status_code == 503, \
-            f"expected 503, got {response.status_code} {response.get_json()}"
-        assert "BID_TOKEN" not in response.get_json().get("error", ""), \
-            "the internal variable name should not be shown to the browser"
+        accepted = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
+                               headers={"X-Bid-Token": flask_app.BOOT_BID_TOKEN})
+        assert accepted.status_code == 200, \
+            f"expected the boot token to work, got {accepted.status_code} {accepted.get_json()}"
+
+        refused = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
+                              headers={"X-Bid-Token": "any-token-at-all"})
+        assert refused.status_code == 401, \
+            f"expected 401, got {refused.status_code} {refused.get_json()}"
     finally:
         flask_app.bid_token = previous_token
         restore(original)
+
+
+def test_the_boot_token_is_accepted_alongside_the_configured_one():
+    """Two carriers, both valid: the cookie the page was served with, and the env var the dev
+    proxy attaches. Neither may lock the other out."""
+    import app as flask_app
+
+    client, original, _ = client_with(bid_market)
+    try:
+        for token in (flask_app.BOOT_BID_TOKEN, TEST_BID_TOKEN):
+            response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
+                                   headers={"X-Bid-Token": token})
+            assert response.status_code == 200, \
+                f"expected {token[:8]}… to be accepted, got {response.status_code}"
+    finally:
+        restore(original)
+
+
+def test_the_boot_token_is_not_a_guessable_constant():
+    """It is what stands between a page on another origin and a bid in a real league, so it
+    has to be generated rather than hardcoded, and long enough not to be guessed."""
+    import app as flask_app
+
+    assert len(flask_app.BOOT_BID_TOKEN) >= 32, \
+        f"expected a long token, got {len(flask_app.BOOT_BID_TOKEN)} characters"
+    assert flask_app.BOOT_BID_TOKEN != flask_app.bid_token, \
+        "the generated token must not be the configured one"
 
 
 def test_post_with_a_non_ascii_token_succeeds():
@@ -1147,31 +1183,21 @@ def test_post_with_a_non_ascii_header_against_an_ascii_token_is_unauthorized():
         restore(original)
 
 
-def test_wrong_token_is_401_while_unset_is_503():
-    """The two misconfiguration-shaped failures must not collapse into one status.
+def test_a_missing_token_is_401_rather_than_a_server_error():
+    """A request with no header at all is the caller's mistake, not the server's.
 
-    A wrong or missing token is the caller's mistake and stays 401; an unset BID_TOKEN
-    is the server's and is 503. Asserting both in one test stops a future edit from
-    quietly merging them back together.
+    This used to have a sibling asserting that an unset BID_TOKEN answered 503 instead - see
+    test_an_unset_bid_token_no_longer_blocks_bidding() for why that state no longer exists.
     """
-    import app as flask_app
-
     client, original, _ = client_with(plain_market)
     try:
-        wrong = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
-                             headers={"X-Bid-Token": "definitely-wrong"})
-        assert wrong.status_code == 401, \
-            f"expected 401 for a wrong token, got {wrong.status_code} {wrong.get_json()}"
-
-        previous_token = flask_app.bid_token
-        flask_app.bid_token = None
-        try:
-            unset = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
-                                 headers={"X-Bid-Token": "any-token-at-all"})
-            assert unset.status_code == 503, \
-                f"expected 503 for an unset token, got {unset.status_code} {unset.get_json()}"
-        finally:
-            flask_app.bid_token = previous_token
+        for headers in ({}, {"X-Bid-Token": ""}, {"X-Bid-Token": "definitely-wrong"}):
+            response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
+                                   headers=headers)
+            assert response.status_code == 401, \
+                f"expected 401 for {headers}, got {response.status_code} {response.get_json()}"
+            assert "BID_TOKEN" not in response.get_json().get("error", ""), \
+                "the internal variable name should not be shown to the browser"
     finally:
         restore(original)
 
@@ -1351,13 +1377,16 @@ if __name__ == "__main__":
           test_delete_without_a_token_is_unauthorized)
     check("DELETE with the wrong token is unauthorized",
           test_delete_with_the_wrong_token_is_unauthorized)
-    check("BID_TOKEN unset refuses every request even with a token",
-          test_bid_token_unset_refuses_every_request_even_with_a_token)
+    check("an unset BID_TOKEN no longer blocks bidding",
+          test_an_unset_bid_token_no_longer_blocks_bidding)
+    check("the boot token is accepted alongside the configured one",
+          test_the_boot_token_is_accepted_alongside_the_configured_one)
+    check("the boot token is generated, not hardcoded",
+          test_the_boot_token_is_not_a_guessable_constant)
     check("a non-ASCII token succeeds", test_post_with_a_non_ascii_token_succeeds)
     check("a non-ASCII header against an ASCII token is unauthorized",
           test_post_with_a_non_ascii_header_against_an_ascii_token_is_unauthorized)
-    check("wrong token is 401 while unset is 503",
-          test_wrong_token_is_401_while_unset_is_503)
+    check("a missing or wrong token is 401", test_a_missing_token_is_401_rather_than_a_server_error)
     check("a transport failure on the POST write is unconfirmed",
           test_post_reports_a_transport_failure_on_the_write_as_unconfirmed)
     check("a transport failure on the DELETE write is unconfirmed",

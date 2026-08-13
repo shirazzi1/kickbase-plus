@@ -61,9 +61,10 @@ class TempDirs:
         self.history_dir = path.join(root, "history")
         makedirs(self.ts_dir, exist_ok=True)
 
-        self.original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        self.original = (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
                          miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR)
-        miscellaneous.DATA_DIR = self.data_dir
+        miscellaneous.PUBLIC_DIR = self.data_dir
+        miscellaneous.STATE_DIR = self.data_dir
         miscellaneous.TIMESTAMP_DIR = self.ts_dir
         miscellaneous.LAST_GOOD_DIR = self.last_good_dir
         miscellaneous.HISTORY_DIR = self.history_dir
@@ -71,7 +72,8 @@ class TempDirs:
         return self
 
     def __exit__(self, *exc):
-        (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+         miscellaneous.TIMESTAMP_DIR,
          miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR) = self.original
         self.tmp.cleanup()
         return False

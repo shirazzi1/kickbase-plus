@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react"
 
 import ManagerDossier, { formatHold } from "./ManagerDossier"
+import { mockDataServer, restoreFetch } from "../hooks/mockDataServer"
 
 // A manager with data behind every metric, and one who has done nothing but exist. The
 // backend writes both kinds: every league member gets an entry, traded or not.
@@ -54,13 +55,19 @@ describe("formatHold", () => {
 })
 
 describe("ManagerDossier", () => {
-    it("says the profiles are missing rather than breaking the tab", () => {
-        // No prop, so the component asks its loader - which finds nothing under Jest, exactly
-        // as it finds nothing on a deployment where the stage has never run
-        render(<ManagerDossier />)
+    it("says the profiles are missing rather than breaking the tab", async () => {
+        // No prop, so the component fetches - and the server answers 404, exactly as a
+        // deployment does where the manager_profiles stage has never run
+        mockDataServer({ datasets: {} })
 
-        expect(screen.getByText(/Noch keine Manager-Profile/)).toBeTruthy()
-        expect(screen.getByText(/manager_profiles/)).toBeTruthy()
+        try {
+            render(<ManagerDossier />)
+
+            expect(await screen.findByText(/Noch keine Manager-Profile/)).toBeTruthy()
+            expect(screen.getByText(/manager_profiles/)).toBeTruthy()
+        } finally {
+            restoreFetch()
+        }
     })
 
     it("says the same for a document without managers", () => {

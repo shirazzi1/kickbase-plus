@@ -2,6 +2,8 @@ import { render, screen, within, fireEvent, act } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import MarketTable from "./MarketTable"
 
+import { currentTimestamps, mockDataServer, restoreFetch } from "../hooks/mockDataServer"
+
 // Kept apart from MarketTable.test.js rather than merged into it: that file needs the
 // real @mui/x-data-grid (it asserts on the row-id warning the real component logs), while
 // every test here needs the "Dein Gebot" column to actually render past jsdom's zero-size
@@ -45,15 +47,13 @@ jest.mock("@mui/x-data-grid", () => ({
     gridVisibleTopLevelRowCountSelector: () => 0
 }))
 
-// MarketTable imports its data at module scope, so the fixture is mocked rather than
-// pointed at the real 92-row market.json - this keeps every row's numbers deliberately
-// distinct and lets a fetch that never resolves be held open on purpose, neither of which
-// is practical against the real file.
+// The table fetches its rows now, so the fixture is served rather than mocked into the module
+// registry - which also means every test below has to serve the datasets *and* answer the bid
+// endpoints, hence the `handler` on mockDataServer.
 //
-// Both mocks are fully self-contained (no reference to anything outside the factory):
-// jest.mock calls are hoisted above the imports below, so a variable declared later in
-// this file would not exist yet when the factory actually runs.
-jest.mock("../data/market.json", () => {
+// The rows keep their deliberately distinct numbers: this suite asserts on formatted euro
+// amounts to find a specific cell, and the real 92-row market.json would collide.
+const MARKET = (() => {
     const row = (overrides) => ({
         playerId: "1",
         teamId: "5",
@@ -109,16 +109,35 @@ jest.mock("../data/market.json", () => {
         // suggestedBid = round(502000 + 3 * 2000) = 508000
         row({ playerId: "702", lastName: "RaceB", marketValue: 502000, price: 602000, avgDailyGrowth: 2000 })
     ]
+})()
+
+const CONFIG = { bepGrowthDays: 3, bepTargetDays: 3 }
+
+// Serve the table's own datasets, and let each case decide what the bid endpoints answer.
+// Without the datasets the table would render its loading state and there would be no cell
+// to click; without the handler the bid request would fall through to the 404 every unknown
+// route gets, which is not any of the failures these cases are about.
+const serveWith = (onBid) => mockDataServer({
+    datasets: { "market.json": MARKET, "balances.json": [], "config.json": CONFIG },
+    timestamps: currentTimestamps(["market", "balances"]),
+    handler: (url, options) => url.includes("/api/market/") ? onBid(url, options) : undefined
 })
 
-jest.mock("../data/config.json", () => ({ bepGrowthDays: 3, bepTargetDays: 3 }))
+const jsonResponse = (body, { ok = true, status = 200 } = {}) =>
+    Promise.resolve({ ok, status, json: async () => body })
+
+afterEach(restoreFetch)
 
 const apiUnreachable = "Die Flask-API ist nicht erreichbar. Läuft app.py?"
 
+// Every case waits for a row before it clicks: the table paints a spinner first now and its
+// rows arrive a microtask later. "Thrown" is in every fixture row set.
+
 describe("MarketTable bidding", () => {
     it("keeps the typed draft and reports the API as unreachable when fetch throws outright", async () => {
-        global.fetch = jest.fn().mockRejectedValue(new Error("network down"))
+        serveWith(() => Promise.reject(new Error("network down")))
         render(<MarketTable />)
+        await screen.findByText("Test Thrown")
 
         await userEvent.click(screen.getByText("212.500 €"))
         const input = screen.getByRole("textbox")
@@ -133,12 +152,10 @@ describe("MarketTable bidding", () => {
     })
 
     it("shows the server's German error verbatim and keeps the draft on a non-OK JSON response", async () => {
-        global.fetch = jest.fn().mockResolvedValue({
-            ok: false,
-            status: 400,
-            json: async () => ({ error: "Das Gebot liegt unter dem Marktwert." })
-        })
+        serveWith(() => jsonResponse({ error: "Das Gebot liegt unter dem Marktwert." },
+                                     { ok: false, status: 400 }))
         render(<MarketTable />)
+        await screen.findByText("Test Thrown")
 
         await userEvent.click(screen.getByText("223.500 €"))
         const input = screen.getByRole("textbox")
@@ -155,12 +172,13 @@ describe("MarketTable bidding", () => {
         // What the dev-server's proxy actually answers when Flask isn't running: a
         // text/plain 500, so response.json() rejects and body.error is never set - the
         // regression case for "Kickbase antwortete mit HTTP 500." showing up instead
-        global.fetch = jest.fn().mockResolvedValue({
+        serveWith(() => Promise.resolve({
             ok: false,
             status: 500,
             json: async () => { throw new Error("Unexpected token in JSON") }
-        })
+        }))
         render(<MarketTable />)
+        await screen.findByText("Test Thrown")
 
         await userEvent.click(screen.getByText("234.500 €"))
         const input = screen.getByRole("textbox")
@@ -175,12 +193,9 @@ describe("MarketTable bidding", () => {
     })
 
     it("shows no bid rather than the stale value after a withdrawal", async () => {
-        global.fetch = jest.fn().mockResolvedValue({
-            ok: true,
-            status: 200,
-            json: async () => ({ ownBid: null })
-        })
+        serveWith(() => jsonResponse({ ownBid: null }))
         render(<MarketTable />)
+        await screen.findByText("Test Thrown")
 
         await userEvent.click(screen.getByText("480.000 €"))
         await userEvent.click(screen.getByLabelText("Gebot zurückziehen"))
@@ -200,14 +215,64 @@ describe("MarketTable bidding", () => {
         expect(screen.queryByText("480.000 €")).not.toBeInTheDocument()
     })
 
+    it("sends the bid token the page was served with", async () => {
+        // The token used to be attached by the CRA dev server's proxy, which does not run in
+        // production any more - so without this the header has no source and every bid is a
+        // 401. Flask sets it as a cookie with index.html; this is the half that reads it back.
+        document.cookie = "bid_token=abc123"
+
+        const server = serveWith(() => jsonResponse({ ownBid: 150000 }))
+
+        render(<MarketTable />)
+        await screen.findByText("Test Thrown")
+
+        await userEvent.click(screen.getByText("212.500 €"))
+        await userEvent.click(screen.getByLabelText("Gebot abgeben"))
+
+        const [, options] = server.mock.calls.find(([url]) => String(url).includes("/api/market/"))
+        expect(options.headers["X-Bid-Token"]).toBe("abc123")
+
+        document.cookie = "bid_token=; expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    })
+
+    it("sends no token header at all when there is no cookie", async () => {
+        // In development the dev proxy attaches its own header from BID_TOKEN. An empty one
+        // from here would have to be overwritten; none at all is also the honest description.
+        document.cookie = "bid_token=; expires=Thu, 01 Jan 1970 00:00:00 GMT"
+
+        const server = serveWith(() => jsonResponse({ ownBid: 150000 }))
+
+        render(<MarketTable />)
+        await screen.findByText("Test Thrown")
+
+        await userEvent.click(screen.getByText("212.500 €"))
+        await userEvent.click(screen.getByLabelText("Gebot abgeben"))
+
+        const [, options] = server.mock.calls.find(([url]) => String(url).includes("/api/market/"))
+        expect(options.headers["X-Bid-Token"]).toBeUndefined()
+    })
+
+    it("renders the whole table without any balance data", async () => {
+        // balances.json was a compile-time import, so an absent one failed the build and this
+        // was unreachable. It is fetched now, and a deployment whose balances stage has not
+        // run yet lands here - where the Mindestgebot cell read rivals[0] unconditionally.
+        serveWith(() => jsonResponse({ ownBid: null }))
+
+        render(<MarketTable />)
+
+        expect(await screen.findByText("Test Thrown")).toBeInTheDocument()
+        expect(screen.getAllByLabelText(/Keine Budgetdaten/).length).toBeGreaterThan(0)
+    })
+
     it("does not let a late response for one row discard another row's in-progress draft", async () => {
         const resolvers = {}
-        global.fetch = jest.fn((url) => new Promise((resolve) => {
+        serveWith((url) => new Promise((resolve) => {
             const [, playerId] = url.match(/\/market\/(\w+)\/bid/)
             resolvers[playerId] = resolve
         }))
 
         render(<MarketTable />)
+        await screen.findByText("Test Thrown")
 
         // Row A already carries a bid well past double its own suggestion, so resubmitting
         // it unchanged goes through the confirmation dialog rather than straight to fetch

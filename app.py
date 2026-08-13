@@ -1,12 +1,38 @@
-import hmac
-import logging
+"""
+### The one process a browser talks to.
 
-from os import getenv
-from flask import Flask, jsonify, request
+Until this version there were two: a create-react-app dev server on port 3000 serving a
+bundle with the data compiled into it, and this Flask app on port 5000 serving the API.
+Fresh data reached a browser only because the dev server noticed a JSON file change and
+recompiled - in production.
+
+Now Flask serves both halves:
+
+  - `/api/data/<name>` hands out the datasets in `data/public`, from an allowlist rather
+    than by passing a path through. `/api/data/timestamps` returns every `ts_*.json` in one
+    response, which is what the per-tab freshness markers are read from.
+  - everything else is the prebuilt React app from `frontend/build`.
+
+That collapses the port split and makes the relative `fetch("/api/...")` calls in the
+frontend work in production for the first time.
+
+Not part of this: binding to localhost and scoping who may reach this port at all. That is
+the piece of hardening the bid token below explicitly does *not* replace.
+"""
+
+import hmac
+import json
+import logging
+import secrets
+
+from glob import glob
+from os import getenv, path
+from flask import Flask, jsonify, request, send_from_directory
 
 import main
-from backend import exceptions, health, miscellaneous
+from backend import datasets, exceptions, health, miscellaneous, state_migration
 from backend.kickbase.v4 import leagues, user
+from backend.paths import BASE_PATH, PUBLIC_DIR, TIMESTAMP_DIR
 
 ### ===============================================================================
 
@@ -14,17 +40,106 @@ from backend.kickbase.v4 import leagues, user
 kb_mail = getenv("KB_MAIL")
 kb_password = getenv("KB_PASSWORD")
 discord_webhook = getenv("DISCORD_WEBHOOK")
+
+### Where `npm run build` puts the frontend. The image builds it in its own stage and copies
+### only the result, so in a container this directory is all that is left of frontend/.
+FRONTEND_BUILD_DIR = path.join(BASE_PATH, "frontend", "build")
+
+### ===============================================================================
+### The token the bid endpoints require.
+###
+### It used to come from exactly one place: BID_TOKEN in the environment, attached to every
+### proxied request by the create-react-app dev server (frontend/src/setupProxy.js). That
+### worked because the dev server was also what served the app - in production it served
+### nothing, and this file now does, so the token had nowhere to come from. Every bid would
+### have answered 401.
+###
+### Two sources are accepted instead:
+###
+###   1. A token this process generates once at boot and hands to the browser as a cookie
+###      when it serves index.html. The frontend reads the cookie and sends it back as
+###      X-Bid-Token. Regenerated on every restart, never written down anywhere.
+###   2. BID_TOKEN from the environment, when it is set. That keeps setupProxy.js working in
+###      development and keeps a script able to bid without loading the page.
+###
+### **What this is and is not.** It is CSRF protection, and nothing more. A page on another
+### origin cannot read the cookie (same-origin policy on document.cookie) and cannot send the
+### header (no CORS, so the browser refuses a cross-origin request carrying it), which is what
+### stops a random page the user opens from spending money in their league. It is *not* access
+### control: anyone who can load the dashboard can read the cookie and therefore bid - exactly
+### as anyone who could reach the dev proxy could bid before. Keeping strangers off the port
+### is a separate change (bind to localhost or put a real auth layer in front), and it is
+### still open.
+BID_TOKEN_COOKIE = "bid_token"
+BOOT_BID_TOKEN = secrets.token_hex(32)
 bid_token = getenv("BID_TOKEN")
 
 ### ===============================================================================
 
-app = Flask(__name__)
-### No CORS here, and none should be added back. The frontend reaches this API through
-### the CRA dev server's proxy (see frontend/src/setupProxy.js), which makes every real
-### request same-origin - Flask itself never needs to answer a cross-origin request. A
-### blanket CORS(app) reflects any Origin, which means any page the user's browser opens
-### could POST/DELETE a bid that spends real money in their real league. Do not add it
-### back to make some other cross-origin case convenient.
+### static_url_path="" puts the build's own assets at the root, which is where index.html
+### expects them ("/static/js/main.js", "/favicon.png"). Requests that match no file fall
+### through to the 404 handler below and get index.html.
+app = Flask(__name__, static_folder=FRONTEND_BUILD_DIR, static_url_path="")
+### No CORS here, and none should be added back. One origin serves both the dashboard and the
+### API now, so Flask never needs to answer a cross-origin request at all. A blanket CORS(app)
+### reflects any Origin, which means any page the user's browser opens could POST/DELETE a bid
+### that spends real money in their real league - and it would defeat the bid token above,
+### whose whole protection is that a foreign page cannot send that header. Do not add it back
+### to make some other cross-origin case convenient.
+
+
+### The datasets moved out of frontend/src/data in this version. Called lazily rather than at
+### import time: importing this module must not create directories, or a test that only wants
+### the Flask app ends up writing into the checkout.
+_migrated = False
+
+
+def _migrate_once():
+    """### Move the old frontend/src/data layout into data/public and data/state.
+
+    Runs before the first request that could read a dataset. entrypoint.py already does this
+    before either child starts, so in a container this finds nothing; it is here for the case
+    where app.py is started on its own.
+    """
+    global _migrated
+
+    if _migrated:
+        return
+
+    _migrated = True
+    state_migration.migrate_legacy_layout()
+
+
+def _send_index():
+    """### Serve the built frontend's entry document, with the bid token attached.
+
+    The cookie is set here rather than on a login: there is no login, and this is the one
+    response that is only ever produced for a browser that is about to run the app.
+
+    `httponly` is deliberately False. The frontend has to read this value and put it in a
+    header - a cookie the browser attaches by itself would be sent by a cross-site request
+    too, which is precisely what has to be prevented. Reading it from JavaScript is what makes
+    the same-origin policy the boundary.
+
+    `secure` is deliberately not set. This is routinely deployed over plain HTTP on a LAN, and
+    a Secure cookie would simply never arrive there - which would turn every bid into a 401
+    with no hint as to why.
+
+    Returns:
+        A Flask response with index.html, or a 503 explaining that nothing was built.
+    """
+    if not path.isfile(path.join(FRONTEND_BUILD_DIR, "index.html")):
+        ### A deployment that skipped the build stage. Said out loud rather than as a bare
+        ### 404, because a 404 here reads as "wrong URL" when the answer is "wrong image".
+        return jsonify({
+            "error": "Das Frontend ist nicht gebaut. Im Container erledigt das die "
+                     "Build-Stage des Images, lokal 'npm run build' in frontend/."
+        }), 503
+
+    response = send_from_directory(FRONTEND_BUILD_DIR, "index.html")
+    response.set_cookie(BID_TOKEN_COOKIE, BOOT_BID_TOKEN, samesite="Strict", path="/")
+
+    return response
 
 
 @app.route("/api/health", methods=["GET"])
@@ -47,6 +162,78 @@ def get_health():
     logging.warning(f"Health check: {report['status']} - {report['reason']}")
 
     return jsonify(report), 503
+
+
+@app.route("/api/data/timestamps", methods=["GET"])
+def get_timestamps():
+    """### Every ts_*.json in one response, keyed by dataset.
+
+    One request rather than fourteen. The frontend needs all of them together anyway: a
+    per-tab freshness marker is the dataset's timestamp *judged against the run manifest*,
+    so a page that fetched them one at a time would render a marker it could not yet
+    justify.
+
+    The keys are the file names without "ts_" and without ".json", so "ts_market.json"
+    arrives as "market" and the manifest as "run_manifest". Built from what is on disk, so a
+    new timestamp file needs no change here.
+
+    An unreadable file is left out of the answer rather than failing it. The frontend already
+    has a word for a dataset it cannot judge ("unbekannt"), and one damaged file must not
+    take the freshness of the other thirteen with it.
+
+    Returns:
+        A JSON object of dataset name to the timestamp document.
+    """
+    _migrate_once()
+
+    index = {}
+
+    for file_path in sorted(glob(path.join(TIMESTAMP_DIR, f"{datasets.TIMESTAMP_PREFIX}*.json"))):
+        name = path.basename(file_path)[len(datasets.TIMESTAMP_PREFIX):-len(".json")]
+
+        try:
+            with open(file_path, "r") as f:
+                index[name] = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logging.warning(f"Skipping {path.basename(file_path)} in the timestamp index: {e}")
+
+    return jsonify(index)
+
+
+@app.route("/api/data/<name>", methods=["GET"])
+def get_data(name):
+    """### Serve one of the datasets the frontend reads.
+
+    The name is checked against backend/datasets.py's allowlist, not turned into a path.
+    That is the whole security model of this route and it is deliberately the boring one: a
+    traversal attempt, a backend-private file and a typo all fail the same membership test
+    before any path is built, so there is no directory to escape from.
+
+    A dataset that has not been written yet answers 404 with a body saying so. That is a
+    normal state, not an error - events.json exists only from the second run on,
+    manager_profiles.json from the first, live_points.json only when the live endpoint has
+    been called - and the frontend renders each of those as an empty state.
+
+    Args:
+        name (str): The dataset's file name, e.g. "market.json".
+
+    Returns:
+        The file, or a JSON error with 404.
+    """
+    if name not in datasets.PUBLIC_DATASETS:
+        ### Deliberately the same answer for "not a dataset", "backend-private" and
+        ### "../../etc/passwd": which of the three it was is not a browser's business.
+        return jsonify({"error": f"Unbekannter Datensatz: {name}"}), 404
+
+    _migrate_once()
+
+    if not path.isfile(path.join(PUBLIC_DIR, name)):
+        return jsonify({
+            "error": f"{name} wurde noch nicht geschrieben.",
+            "written": False
+        }), 404
+
+    return send_from_directory(PUBLIC_DIR, name, mimetype="application/json")
 
 
 @app.route("/api/livepoints", methods=["GET"])
@@ -122,44 +309,63 @@ def _listing(user_token: str, league_id: str, player_id: str):
     return None
 
 
+def _accepted_bid_tokens():
+    """### The tokens a bid request may carry.
+
+    Always the boot token, which the browser gets as a cookie with index.html. Plus
+    BID_TOKEN from the environment when it is set, which is how the CRA dev server's
+    setupProxy.js reaches these endpoints in development and how a script would.
+
+    Never empty, so there is no "unconfigured" state left to fail closed on. That mattered
+    while the only token came from an env var an operator could forget; a token this process
+    generates itself cannot be forgotten.
+
+    Returns:
+        list: The accepted tokens, as UTF-8 bytes.
+    """
+    tokens = [BOOT_BID_TOKEN]
+
+    if bid_token:
+        tokens.append(bid_token)
+
+    return [token.encode("utf-8") for token in tokens]
+
+
 def _check_bid_token():
-    """### Rejects the request unless it carries the correct X-Bid-Token header.
+    """### Rejects the request unless it carries one of the accepted X-Bid-Token values.
 
-    Both write endpoints call this before doing anything else. The token is meant to
-    reach Flask only from the CRA dev server's setupProxy.js, never from the browser
-    directly - see frontend/src/setupProxy.js for where it is actually attached.
+    Both write endpoints call this before doing anything else. See BOOT_BID_TOKEN at the top
+    of this module for where the token comes from and, more importantly, for what this
+    protects against (a foreign page spending money in your league) and what it does not
+    (anyone who can load the dashboard).
 
-    Fails closed: if BID_TOKEN is unset or empty, every request is refused rather than
-    let through. An unset secret must never be silently read as "no check configured",
-    or removing the env var would turn the check off instead of tightening it. That case
-    is a server misconfiguration, not a failed authentication - it answers 503 and never
-    names the environment variable to the browser, unlike a wrong or missing token, which
-    is the caller's mistake and stays 401.
+    The comparison uses hmac.compare_digest() rather than != so a byte-by-byte early exit
+    cannot be timed from outside. Every accepted token is compared, without short-circuiting
+    on the first match, so the number of comparisons does not depend on which one matched.
 
-    The comparison against the configured token uses hmac.compare_digest() rather than
-    != so a byte-by-byte early exit cannot be timed from outside.
-
-    Both sides are encoded to UTF-8 bytes before that comparison. Werkzeug decodes
-    headers as latin-1, so a header value can arrive as a str holding a non-ASCII
-    character, and compare_digest() raises TypeError as soon as either argument is a
-    non-ASCII str - reproducible with hmac.compare_digest("ä", "x"). Uncaught, that
-    would turn an unauthenticated request into a bare 500 with no JSON error body, and
-    would turn an operator's own choice of an umlaut in BID_TOKEN into a 500 on every
-    single bid. Comparing bytes instead sidesteps the restriction entirely.
+    Both sides are compared as UTF-8 bytes. Werkzeug decodes headers as latin-1, so a header
+    value can arrive as a str holding a non-ASCII character, and compare_digest() raises
+    TypeError as soon as either argument is a non-ASCII str - reproducible with
+    hmac.compare_digest("ä", "x"). Uncaught, that would turn an unauthenticated request into
+    a bare 500 with no JSON error body, and would turn an operator's own choice of an umlaut
+    in BID_TOKEN into a 500 on every single bid. Comparing bytes sidesteps the restriction.
 
     Returns:
         A (response, status) tuple to return immediately if the request is rejected,
         or None if the request may proceed.
     """
-    if not bid_token:
-        logging.error("Flask API: BID_TOKEN is not set, refusing all bid requests.")
-        return jsonify({"error": "Der Server ist für Gebote derzeit nicht konfiguriert. "
-                                  "Bitte informiere die Person, die den Server "
-                                  "betreibt."}), 503
+    supplied = request.headers.get("X-Bid-Token", "").encode("utf-8")
 
-    supplied_token = request.headers.get("X-Bid-Token", "")
-    if not hmac.compare_digest(supplied_token.encode("utf-8"), bid_token.encode("utf-8")):
-        return jsonify({"error": "Ungültiges oder fehlendes Token für diese Aktion."}), 401
+    matched = False
+
+    for accepted in _accepted_bid_tokens():
+        if hmac.compare_digest(supplied, accepted):
+            matched = True
+
+    if not matched:
+        return jsonify({
+            "error": "Ungültiges oder fehlendes Token für diese Aktion. Lade die Seite neu."
+        }), 401
 
     return None
 
@@ -365,6 +571,28 @@ def withdraw_bid(player_id):
     logging.info(f"Flask API: Bid on player {player_id} withdrawn.")
 
     return jsonify({"ownBid": None})
+
+
+@app.route("/", methods=["GET"])
+def serve_root():
+    """### The dashboard itself."""
+    return _send_index()
+
+
+@app.errorhandler(404)
+def serve_single_page_app(error):
+    """### Anything that is not a file and not an API route is a route inside the app.
+
+    Registered as the 404 handler rather than as a catch-all route, so Flask's own static
+    handler keeps serving the build's assets and only what it could not find lands here.
+
+    /api/ keeps its 404s. Handing index.html to a fetch() that asked for a dataset would
+    turn a missing file into a JSON parse error somewhere else entirely.
+    """
+    if request.path.startswith("/api/"):
+        return jsonify({"error": f"Unbekannte API-Route: {request.path}"}), 404
+
+    return _send_index()
 
 
 if __name__ == "__main__":

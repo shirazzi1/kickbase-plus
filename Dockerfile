@@ -1,31 +1,64 @@
-FROM ubuntu 
+### The frontend is built here, once, and only its output travels on.
+###
+### It used to be built at *runtime*: the container ran `npm install` on every start and then
+### `npm start`, a create-react-app dev server, in production - because the data was compiled
+### into the bundle and a scrape could only reach a browser by recompiling it. The data is
+### fetched from /api/data now, so the bundle is a build artefact like any other.
+###
+### What this stage removes from the running container: node, npm, node_modules (~250 MB), the
+### file watcher, two minutes of npm install per start, and a port.
+FROM node:20-slim AS frontend-build
+
+WORKDIR /build
+
+### The manifests first, so a change to the source does not invalidate the install layer
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+
+COPY frontend/ ./
+
+### Read by the frontend and shown in its header. It has to be set in *this* stage: the build
+### bakes it in, and an ARG in the runtime stage would arrive far too late.
+### Set with "docker build . --build-arg REACT_APP_VERSION=<version>"
+ARG REACT_APP_VERSION
+ENV REACT_APP_VERSION=$REACT_APP_VERSION
+
+### CI=true makes react-scripts treat warnings as warnings rather than as an interactive prompt
+RUN CI=true npm run build
+
+### ===============================================================================
+
+FROM ubuntu
 
 ### Set working directory and copy files
 WORKDIR /code
 COPY . /code/
 
+### The COPY above takes the whole context, frontend/src included - both stages share one
+### .dockerignore, so the sources cannot be excluded there without taking them away from the
+### stage that builds them. Dropped here instead: nothing in the runtime image executes
+### JavaScript, so the only thing from frontend/ that belongs in it is the built bundle.
+RUN rm -rf /code/frontend/src /code/frontend/public /code/frontend/node_modules
+
+COPY --from=frontend-build /build/build /code/frontend/build
+
 ### Make script executable
 RUN chmod 770 /code/main.py
 
-### Install dependencies
+### Install dependencies.
+###
+### No Node.js any more: nothing in the running container executes JavaScript. Flask serves the
+### prebuilt bundle from /code/frontend/build.
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt update && apt upgrade -y \
     && apt install -y python3 python3-pip curl tree nano tzdata
 
-### Installs Node.js and npm directly
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs
-
 ### Update pip and install dependencies
 RUN pip install --upgrade pip && pip install --upgrade -r requirements.txt
 
-### Set environment variables / build arguments
-### Will later be read from frontend
-### Can be set with "docker build . -t ghcr.io/casudo/kickbase-insights:<version> --build-arg REACT_APP_VERSION=<version>"
-ARG REACT_APP_VERSION 
+### Also read at runtime, by main.py, for the version in the log
+ARG REACT_APP_VERSION
 ENV REACT_APP_VERSION=$REACT_APP_VERSION
-
-ENV WATCHPACK_POLLING=true
 
 ### Set timezone
 ENV TZ=Europe/Berlin
@@ -41,11 +74,11 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 ### would not have made Kickbase answer. It answers 503 when no run has completed for far
 ### longer than RUN_SCHEDULE allows, which is the case a restart does fix.
 ###
-### The start period has to cover the first main.py run plus both startup sleeps. A cold
-### run walks every player in the competition and takes minutes, and Flask is the last
-### thing to come up.
-HEALTHCHECK --interval=60s --timeout=10s --start-period=900s --retries=3 \
-    CMD curl -fsS http://localhost:5000/api/health || exit 1
+### The start period covers the first main.py run, which walks every player in the competition
+### and takes minutes. It used to have to cover two startup sleeps and an npm install on top of
+### that; both are gone with the dev server, so Flask now answers within seconds of the start.
+HEALTHCHECK --interval=60s --timeout=10s --start-period=600s --retries=3 \
+    CMD curl -fsS http://localhost:${FLASK_PORT:-5000}/api/health || exit 1
 
 ### Set entrypoint
 ### https://stackoverflow.com/a/29745541

@@ -12,9 +12,32 @@ import Tooltip from '@mui/material/Tooltip'
 
 import { trendIcons, currencyFormatter, getStatusIcon } from './SharedConstants'
 
-import data from '../data/taken_players.json'
+import { useJsonData } from "../hooks/useJsonData"
+import { dataGate } from "./DataState"
 
+const DATASET = "taken_players.json"
+
+// Split in two because the planner seeds its state from the data: the selected manager is the
+// first one in the squads. With a compile-time import that was available before the first
+// render; with a fetch it is not, and a useState default that runs once against an empty array
+// stays empty forever. The inner component is therefore only mounted once the squads are
+// there, which lets every piece of state below keep working exactly as it did.
 function LineupPlanner() {
+    const { status, data, missing, error, reload } = useJsonData(DATASET)
+
+    const gate = dataGate({
+        name: DATASET, status, error, missing, reload, rows: data,
+        missingText: "Der Aufstellungsplaner arbeitet mit den Kadern der Liga. Die schreibt der "
+            + "Schritt 'taken_free_players' eines Scrape-Laufs."
+    })
+
+    if (gate)
+        return gate
+
+    return <Planner data={data} />
+}
+
+function Planner({ data }) {
     const managers = [...new Set(data.map(item => item.owner))]
 
     const [manager, setManager] = useState(managers[0])

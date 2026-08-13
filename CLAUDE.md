@@ -30,6 +30,11 @@ ist der Teil, der das abfängt.
   keine Semikolons.
 - Tests sind eigenständige Skripte unter `tests/`, ohne Test-Framework, ausgeführt mit
   `./venv/bin/python tests/<name>.py`. Als Vorlage dient `tests/test_start_date.py`.
-- `frontend/src/data/*.json` wird zur Laufzeit erzeugt und ist nicht eingecheckt. Ein
-  frischer Worktree hat die Dateien nicht — aus dem Haupt-Checkout kopieren, bevor
-  `npm run build` oder `npm start` laufen soll.
+- Die Datensätze liegen unter `data/public` (was das Frontend über `/api/data/<name>` liest)
+  und `data/state` (was nur das Backend liest). Beides wird zur Laufzeit erzeugt und ist
+  nicht eingecheckt. Ein frischer Worktree hat die Dateien nicht — `npm run build` und
+  `npm start` funktionieren trotzdem, weil das Frontend nichts mehr zur Buildzeit importiert.
+  Wer echte Daten im UI sehen will, kopiert `data/` aus dem Haupt-Checkout.
+- Welcher Datensatz wohin gehört, steht in `backend/datasets.py`. Ein neuer Datensatz muss
+  dort in genau eine der beiden Listen — und, wenn ihn das Frontend liest, zusätzlich in
+  `frontend/src/hooks/dataContracts.js`. `tests/test_data_plane.py` hält beide aneinander fest.

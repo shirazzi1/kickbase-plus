@@ -177,11 +177,14 @@ def test_owned_player_lands_in_taken_not_free():
         ### which is what the API actually returns
         stats_by_id = {"14300": OWNED_PLAYER, "173": FREE_PLAYER_LISTED_UNOWNED}
 
-        original = (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        original = (main.PUBLIC_DIR, main.STATE_DIR,
+                    miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
                     miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
                     leagues.transfers, leagues.player_statistics, leagues.player_marketvalue)
-        main.DATA_DIR = data_dir
-        miscellaneous.DATA_DIR = data_dir
+        main.PUBLIC_DIR = data_dir
+        main.STATE_DIR = data_dir
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
         miscellaneous.HISTORY_DIR = path.join(tmp, "history")
@@ -203,7 +206,8 @@ def test_owned_player_lands_in_taken_not_free():
             with open(path.join(data_dir, "free_players.json")) as f:
                 free = json.load(f)
         finally:
-            (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+            (main.PUBLIC_DIR, main.STATE_DIR,
+             miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
              miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
              leagues.transfers, leagues.player_statistics,
              leagues.player_marketvalue) = original

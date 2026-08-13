@@ -21,7 +21,7 @@ from os import makedirs, path
 ### Make the repository root importable regardless of where this is run from
 sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
 
-from backend import exceptions, miscellaneous, runs
+from backend import exceptions, miscellaneous, runs, state_migration
 
 ### ===============================================================================
 
@@ -272,30 +272,37 @@ def run_main(stage_results):
                 outcome()
         return stage
 
-    original = (main.DATA_DIR, main.LOG_DIR, main.TIMESTAMP_DIR,
-                miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+    original = (main.PUBLIC_DIR, main.STATE_DIR,
+                main.LOG_DIR, main.TIMESTAMP_DIR,
+                miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
                 miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
-                main.login, main.build_stages, leagues.clear_caches)
+                main.login, main.build_stages, leagues.clear_caches,
+                state_migration.migrate_legacy_layout)
 
-    main.DATA_DIR = data_dir
+    main.PUBLIC_DIR = data_dir
+    main.STATE_DIR = data_dir
     main.LOG_DIR = path.join(tmp.name, "logs")
     main.TIMESTAMP_DIR = ts_dir
-    miscellaneous.DATA_DIR = data_dir
+    miscellaneous.PUBLIC_DIR = data_dir
+    miscellaneous.STATE_DIR = data_dir
     miscellaneous.TIMESTAMP_DIR = ts_dir
     miscellaneous.LAST_GOOD_DIR = path.join(tmp.name, "last-good")
     miscellaneous.HISTORY_DIR = path.join(tmp.name, "history")
 
     try:
+        state_migration.migrate_legacy_layout = lambda: 0
         main.login = lambda: (object(), "token", "1")
         main.build_stages = lambda *a: [(name, fake_stage(name)) for name in stage_results]
         leagues.clear_caches = lambda: None
 
         return main.main(), ts_dir, tmp
     finally:
-        (main.DATA_DIR, main.LOG_DIR, main.TIMESTAMP_DIR,
-         miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        (main.PUBLIC_DIR, main.STATE_DIR,
+         main.LOG_DIR, main.TIMESTAMP_DIR,
+         miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
          miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
-         main.login, main.build_stages, leagues.clear_caches) = original
+         main.login, main.build_stages, leagues.clear_caches,
+         state_migration.migrate_legacy_layout) = original
 
 
 def test_main_runs_every_stage_and_reports_all_ok():
@@ -393,7 +400,8 @@ def test_a_failed_login_produces_a_manifest_that_is_not_ok():
     makedirs(ts_dir, exist_ok=True)
 
     original = (main.LOG_DIR, main.TIMESTAMP_DIR, miscellaneous.TIMESTAMP_DIR,
-                main.login, leagues.clear_caches)
+                main.login, leagues.clear_caches,
+                state_migration.migrate_legacy_layout)
     main.LOG_DIR = path.join(tmp.name, "logs")
     main.TIMESTAMP_DIR = ts_dir
     miscellaneous.TIMESTAMP_DIR = ts_dir
@@ -402,13 +410,15 @@ def test_a_failed_login_produces_a_manifest_that_is_not_ok():
         def failing_login():
             raise exceptions.LoginException("[CRITICAL] Login failed!")
 
+        state_migration.migrate_legacy_layout = lambda: 0
         main.login = failing_login
         leagues.clear_caches = lambda: None
 
         result = main.main()
     finally:
         (main.LOG_DIR, main.TIMESTAMP_DIR, miscellaneous.TIMESTAMP_DIR,
-         main.login, leagues.clear_caches) = original
+         main.login, leagues.clear_caches,
+         state_migration.migrate_legacy_layout) = original
         tmp.cleanup()
         runs.end_run()
 
@@ -450,15 +460,18 @@ def run_once_with(login_failure):
     with open(path.join(ts_dir, "ts_main.json"), "w") as f:
         json.dump({"time": "2026-08-13T05:00:00", "runId": "RUN-1", "allOk": True}, f)
 
-    original = (main.LOG_DIR, main.TIMESTAMP_DIR, main.DATA_DIR,
-                miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+    original = (main.LOG_DIR, main.TIMESTAMP_DIR, main.PUBLIC_DIR, main.STATE_DIR,
+                miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
                 miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
-                main.login, leagues.clear_caches)
+                main.login, leagues.clear_caches,
+                state_migration.migrate_legacy_layout)
 
     main.LOG_DIR = path.join(tmp.name, "logs")
     main.TIMESTAMP_DIR = ts_dir
-    main.DATA_DIR = data_dir
-    miscellaneous.DATA_DIR = data_dir
+    main.PUBLIC_DIR = data_dir
+    main.STATE_DIR = data_dir
+    miscellaneous.PUBLIC_DIR = data_dir
+    miscellaneous.STATE_DIR = data_dir
     miscellaneous.TIMESTAMP_DIR = ts_dir
     miscellaneous.LAST_GOOD_DIR = path.join(tmp.name, "last-good")
     miscellaneous.HISTORY_DIR = path.join(tmp.name, "history")
@@ -470,6 +483,7 @@ def run_once_with(login_failure):
         def failing_login():
             raise login_failure
 
+        state_migration.migrate_legacy_layout = lambda: 0
         main.login = failing_login
         leagues.clear_caches = lambda: None
 
@@ -482,10 +496,11 @@ def run_once_with(login_failure):
 
         return manifest, written_manifest, written_main
     finally:
-        (main.LOG_DIR, main.TIMESTAMP_DIR, main.DATA_DIR,
-         miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        (main.LOG_DIR, main.TIMESTAMP_DIR, main.PUBLIC_DIR, main.STATE_DIR,
+         miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
          miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
-         main.login, leagues.clear_caches) = original
+         main.login, leagues.clear_caches,
+         state_migration.migrate_legacy_layout) = original
         tmp.cleanup()
         runs.end_run()
 

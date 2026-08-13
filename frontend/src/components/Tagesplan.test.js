@@ -5,11 +5,10 @@ process.env.TZ = "Europe/Berlin"
 
 import { render, screen } from "@testing-library/react"
 
-// events.json is written by the scraper at runtime and does not exist in a fresh checkout,
-// so this mock is virtual: it stands in for a module that is legitimately absent until the
-// first run has happened. The component takes the events as a prop as well, which is what
-// the cases below use - the mock is only here so the import resolves.
-jest.mock("../data/events.json", () => ([]), { virtual: true })
+// The virtual mock of ../data/events.json that used to stand here is gone with the import it
+// stood in for: the tab fetches events.json now, and a file the scrape has not written is a 404
+// rather than an unresolvable module. The cases below hand the events in as a prop, and the
+// component then requests nothing at all.
 
 const Tagesplan = require("./Tagesplan").default
 

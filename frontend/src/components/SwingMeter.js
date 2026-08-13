@@ -27,10 +27,15 @@ import {
     swingHeadline,
 } from "./swingFormulas"
 
-// Import data
-import takenPlayers from "../data/taken_players.json"
-import matchDays from "../data/match_days.json"
-import timestampLivePoints from "../data/timestamps/ts_live_points.json"
+import { useDataRefresh, useJsonFiles } from "../hooks/useJsonData"
+import { dataGate } from "./DataState"
+
+// The squads to compare against the live points, and the kickoff windows the match day phase
+// is read from. The age of the live data itself comes from the timestamp index, which the
+// refresh context already holds - one document rather than a fourteenth request.
+const TAKEN_PLAYERS = "taken_players.json"
+const MATCH_DAYS = "match_days.json"
+const DATASETS = [TAKEN_PLAYERS, MATCH_DAYS]
 
 // The bars are static between scrapes, but the data age next to them is not: a "vor 3 Min."
 // that stands still is worse than none.
@@ -165,13 +170,25 @@ const differentialHint = (fieldable, open, subject, reference) => {
  * actually fielded is not in the API, so every open player is reported as a possibility —
  * hence "falls aufgestellt" on every part that has not been played yet.
  */
-function SwingMeter({ entries }) {
+function SwingMeter({ entries, takenPlayers: takenProp, matchDays: matchDaysProp, livePointsStamp }) {
     const [now, setNow] = useState(() => Date.now())
 
     useEffect(() => {
         const timer = setInterval(() => setNow(Date.now()), TICK_INTERVAL_MS)
         return () => clearInterval(timer)
     }, [])
+
+    // Fetched unless the caller brought both, which is what the tests do
+    const brought = takenProp !== undefined && matchDaysProp !== undefined
+    const fetched = useJsonFiles(useMemo(() => (brought ? [] : DATASETS), [brought]))
+    const refresh = useDataRefresh()
+
+    const takenPlayers = brought ? takenProp : fetched.data[TAKEN_PLAYERS]
+    const matchDays = brought ? matchDaysProp : fetched.data[MATCH_DAYS]
+
+    // The age of the live points, out of the timestamp index rather than out of a fourteenth
+    // fetch of its own. `livePointsStamp` is the test seam.
+    const timestampLivePoints = livePointsStamp ?? refresh.timestamps?.live_points ?? {}
 
     const managers = useMemo(
         () => [...new Set((entries || []).map((entry) => entry.userName))].sort((a, b) => a.localeCompare(b)),
@@ -184,7 +201,9 @@ function SwingMeter({ entries }) {
     const [rivalName, setRivalName] = useState(
         () => managers.find((manager) => manager !== ownName) ?? managers[0])
 
-    const matchDay = useMemo(() => currentMatchDay(matchDays, now), [now])
+    // matchDays and takenPlayers arrive after the first render now, so both belong in the
+    // dependency lists. Without them the meter would keep the empty first result forever.
+    const matchDay = useMemo(() => currentMatchDay(matchDays, now), [matchDays, now])
     const phase = matchDay ? matchDay.phase : RUNNING
 
     const ownEntry = (entries || []).find((entry) => entry.userName === ownName)
@@ -194,10 +213,25 @@ function SwingMeter({ entries }) {
         ownPlayers: buildRoster({ userName: ownName, livePlayers: ownEntry?.players, takenPlayers }),
         rivalPlayers: buildRoster({ userName: rivalName, livePlayers: rivalEntry?.players, takenPlayers }),
         phase,
-    }), [ownName, rivalName, ownEntry, rivalEntry, phase])
+    }), [ownName, rivalName, ownEntry, rivalEntry, phase, takenPlayers])
 
     const pointsPerPlayer = useMemo(() => averagePointsPerPlayer(entries, phase), [entries, phase])
     const bounds = swingBounds(decomposition, pointsPerPlayer)
+
+    // Every hook above this line. The squads are what the decomposition needs; without them
+    // every live player would count as a differential of his own.
+    const gate = brought ? null : dataGate({
+        name: TAKEN_PLAYERS,
+        status: fetched.status,
+        error: fetched.error,
+        missing: fetched.missing.includes(TAKEN_PLAYERS),
+        reload: fetched.reload,
+        missingText: "Der Swing-Meter vergleicht die Kader zweier Manager. Die schreibt der "
+            + "Schritt 'taken_free_players' eines Scrape-Laufs."
+    })
+
+    if (gate)
+        return gate
 
     if (managers.length < 2) {
         return (

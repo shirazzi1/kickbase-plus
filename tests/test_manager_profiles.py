@@ -557,10 +557,13 @@ def run_stage(files, cached=None):
             with open(path.join(data_dir, file_name), "w") as f:
                 json.dump(content, f)
 
-        original = (profiles.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        original = (profiles.PUBLIC_DIR, profiles.STATE_DIR,
+                    miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
                     leagues.cached_market_value)
-        profiles.DATA_DIR = data_dir
-        miscellaneous.DATA_DIR = data_dir
+        profiles.PUBLIC_DIR = data_dir
+        profiles.STATE_DIR = data_dir
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         leagues.cached_market_value = lambda player_id: (cached or {}).get(str(player_id))
 
@@ -574,7 +577,8 @@ def run_stage(files, cached=None):
 
             return document, stamp
         finally:
-            (profiles.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+            (profiles.PUBLIC_DIR, profiles.STATE_DIR,
+             miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
              leagues.cached_market_value) = original
 
 

@@ -16,8 +16,11 @@ import Chip from "@mui/material/Chip"
 import Divider from "@mui/material/Divider"
 import Typography from "@mui/material/Typography"
 
-// Import data
-import data from "../data/events.json"
+import { useJsonData } from "../hooks/useJsonData"
+import { DataError, DataLoading } from "./DataState"
+import { ERROR, LOADING } from "../hooks/useJsonData"
+
+const DATASET = "events.json"
 
 // The severity scale from backend/events.py, in the words the tab uses for it. Kept as a
 // lookup rather than as a comparison chain so an unknown number degrades to a plain badge
@@ -113,8 +116,26 @@ function EventRow({ event }) {
     )
 }
 
-export default function Tagesplan({ events = data, now = new Date() }) {
-    const rows = Array.isArray(events) ? events : []
+/**
+ * The tab, fetching its own events.
+ *
+ * `events` stays a prop with the fetch as the default, so the tests hand in fixtures. A file
+ * the scrape has not written yet needs no special case here: the hook hands back an empty list
+ * for it, and EmptyState below already says exactly the right thing about that - the history
+ * store needs two runs before there is anything to diff.
+ */
+export default function Tagesplan({ events, now = new Date() }) {
+    // Nothing is fetched when the caller brought its own events
+    const fetched = useJsonData(events === undefined ? DATASET : null)
+    const rows = Array.isArray(events) ? events : (Array.isArray(fetched.data) ? fetched.data : [])
+
+    if (events === undefined) {
+        if (fetched.status === LOADING)
+            return <DataLoading name={DATASET} />
+
+        if (fetched.status === ERROR)
+            return <DataError name={DATASET} error={fetched.error} onRetry={fetched.reload} />
+    }
 
     if (rows.length === 0)
         return <EmptyState />

@@ -8,10 +8,14 @@ import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import { DataGrid } from "@mui/x-data-grid";
 import Avatar from "@mui/material/Avatar";
 
-// Import data
-import data from "../data/league_user_stats.json";
+import { useJsonData } from "../hooks/useJsonData";
+import { dataGate } from "./DataState";
+
+const DATASET = "league_user_stats.json";
 
 function Battles() {
+    const { status, data, missing, error, reload } = useJsonData(DATASET);
+
     // Define the battles (accordion)
     const battles = [
         { type: "Spieltagsdominator", valueField: "mdWins", label: "Siege", explanation: "Die meisten Spieltagssiege" },
@@ -31,6 +35,18 @@ function Battles() {
             value: user[valueField],
         }));
     };
+
+    // Every hook above this line: the gate returns early, and the rules of hooks do
+    // not allow that before the last of them has run.
+    // rows: every accordion names the leader, so there is nothing to render without one
+    const gate = dataGate({
+        name: DATASET, status, error, missing, reload, rows: data,
+        missingText: "Die Battles vergleichen die Manager der Liga miteinander. Die Zahlen dafür "
+            + "schreibt der Schritt 'league_user_stats' eines Scrape-Laufs."
+    });
+
+    if (gate)
+        return gate;
 
     // Function to render an accordion for each battle
     const battleAccordions = battles.map(({ type, valueField, label, explanation }) => {

@@ -2,9 +2,14 @@ import { Box } from '@mui/material'
 import PagedDataGrid from './PagedDataGrid'
 import { currencyOrDash, deltaCellClassName, deltaColumnStyles } from './SharedConstants'
 
-import data from '../data/market_value_changes.json'
+import { useJsonData } from "../hooks/useJsonData"
+import { dataGate } from "./DataState"
+
+const DATASET = "market_value_changes.json"
 
 function MarketValueChangesTable() {
+    const { status, data, missing, error, reload } = useJsonData(DATASET)
+
     const columns = [
         {
             field: 'teamLogo',
@@ -100,6 +105,13 @@ function MarketValueChangesTable() {
             flex: 2
         }
     ]
+
+    // Every hook above this line: the gate returns early, and the rules of hooks do
+    // not allow that before the last of them has run.
+    const gate = dataGate({ name: DATASET, status, error, missing, reload })
+
+    if (gate)
+        return gate
 
     const rows = data.map((row, i) => (
         {

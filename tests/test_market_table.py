@@ -63,7 +63,7 @@ def set_bep_days(growth, target):
 
 
 def run_main_config_write():
-    """Call the config writer with DATA_DIR redirected, and return what it wrote."""
+    """Call the config writer with PUBLIC_DIR redirected, and return what it wrote."""
     import json
     import tempfile
 
@@ -75,15 +75,16 @@ def run_main_config_write():
 
         import main
 
-        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR)
-        miscellaneous.DATA_DIR = data_dir
+        original = (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR)
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         try:
             main.write_bep_config()
             with open(path.join(data_dir, "config.json")) as f:
                 return json.load(f)
         finally:
-            miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR = original
+            miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR = original
 
 
 ### ===============================================================================
@@ -301,10 +302,12 @@ def run_market():
         ts_dir = path.join(data_dir, "timestamps")
         makedirs(ts_dir, exist_ok=True)
 
-        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        original = (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+                    miscellaneous.TIMESTAMP_DIR,
                     miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
                     leagues.get_market, leagues.player_statistics, leagues.player_marketvalue)
-        miscellaneous.DATA_DIR = data_dir
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
         miscellaneous.HISTORY_DIR = path.join(tmp, "history")
@@ -327,7 +330,8 @@ def run_market():
             with open(path.join(data_dir, "market.json")) as f:
                 rows = json.load(f)
         finally:
-            (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+            (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+             miscellaneous.TIMESTAMP_DIR,
              miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR, leagues.get_market,
              leagues.player_statistics, leagues.player_marketvalue) = original
 
