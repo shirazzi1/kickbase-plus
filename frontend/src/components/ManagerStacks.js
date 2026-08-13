@@ -54,15 +54,17 @@ function ManagerStacks({ balances }) {
         {/* balances.json written before this feature carries no "isSelf", and guessing
             which manager is the user would be worse than saying so. Outside the accordion
             on purpose: it is collapsed by default, and a warning nobody opens is no
-            warning - three columns quietly say something else than they mean until the
+            warning - four columns quietly say something else than they mean until the
             next scrape has run. */}
         {!me && (
             <Alert severity="warning" sx={{ margin: "0 15px 10px" }}>
                 Noch ist kein Manager als 'du' markiert - das schreibt erst der nächste
                 Scrape-Lauf. Bis dahin zählst du bei 'Verdeckte Bieter' mit, obwohl der
                 Spaltenkopf dich ausnimmt; das Mindestgebot ist nicht auf dein eigenes Budget
-                begrenzt und erscheint auch auf deinen eigenen Listungen; und 'Zwangsverkauf
-                droht' kann auch deine eigenen Listungen markieren.
+                begrenzt und erscheint auch auf deinen eigenen Listungen; 'Zwangsverkauf
+                droht' kann auch deine eigenen Listungen markieren; und bei 'Wahrscheinliche
+                Mitbieter' kannst du selbst als Mitbieter auftauchen, denn auch dort wird der
+                Nutzer erst mit dieser Markierung ausgenommen.
             </Alert>
         )}
         <Accordion disableGutters sx={{ margin: "0 15px 10px", backgroundColor: "transparent" }}>

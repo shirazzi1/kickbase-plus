@@ -20,6 +20,7 @@ import CloseIcon from "@mui/icons-material/Close"
 // import Button from "@mui/material/Button";
 
 // Import custom components from the project
+import Tagesplan from "./components/Tagesplan"
 import MarketTable from "./components/MarketTable"
 import TurnoversTable from "./components/TurnoversTable"
 import TakenPlayersTable from "./components/TakenPlayersTable"
@@ -35,6 +36,7 @@ import SeasonStatsTable from "./components/SeasonStatsTable"
 // import LivePoints from "./components/LivePoints"
 import Balances from "./components/Balances"
 import Battles from "./components/Battles"
+import ManagerDossier from "./components/ManagerDossier"
 
 // Import config
 import config from "./data/config.json"
@@ -79,7 +81,9 @@ const lightTheme = createTheme({ palette: { mode: "light" } })
 // Main App component
 function App() {
   // State variables
-  const [selectedTab, setSelectedTab] = useState("1")
+  // The Tagesplan opens first: it is the only tab that says what changed since you last
+  // looked, which is the question the rest of the tabs are opened to answer by hand.
+  const [selectedTab, setSelectedTab] = useState("0")
   const [darkModeEnabled, setDarkModeEnabled] = useState(false)
   const [disclaimerVisible, setDisclaimerVisible] = useState(true);
   // const [refreshing, setRefreshing] = useState(false); // State to manage refreshing
@@ -167,11 +171,15 @@ function App() {
             <Grid item>
               {/* TabList contains the tabs for navigation */}
               <TabList onChange={(e, v) => setSelectedTab(v)}>
+                <Tab label="Tagesplan" value="0" />
                 <Tab label="Transfers" value="1" />
                 <Tab label="Transfererlöse" value="2" />
                 <Tab label="Spieler" value="3" />
                 {/* <Tab label="Live" value="4" /> */}
                 <Tab label="Liga" value="5" />
+                {/* Next to the league table on purpose: both tabs are about the managers
+                    rather than about the players */}
+                <Tab label="Manager" value="8" />
                 <Tab label="Changelog" value="6" />
                 <Tab label="Dev" value="7" />
               </TabList>
@@ -184,11 +192,21 @@ function App() {
           </Grid>
 
           {/* TabPanel contains the content for each tab */}
+          <TabPanel sx={{ padding: 0 }} value="0">
+
+            {/* What changed since the last runs. Everything else in this app shows a state;
+                this shows the difference between two of them. */}
+            <Paper sx={{ marginTop: "25px" }} elevation={5}>
+              <Typography variant="h4" sx={{ padding: "15px" }}>Tagesplan <HelpIcon text="Was sich in den letzten 48 Stunden geändert hat, aus dem Vergleich aufeinanderfolgender Läufe: neue Listungen, Preissenkungen, Marktwertsprünge, ablaufende Kickbase-Angebote und Manager, denen der Spielraum ausgeht. Die Kennzeichnung sagt, wie dringend es ist - 'Jetzt' heißt, dass Warten bis zum nächsten Blick wahrscheinlich zu spät ist. Ein Ablaufdatum liefert Kickbase nur für seine eigenen Angebote, deshalb tauchen von Managern gelistete Spieler hier nie als 'Läuft ab' auf."/></Typography>
+              <Tagesplan />
+            </Paper>
+          </TabPanel>
+
           <TabPanel sx={{ padding: 0 }} value="1">
             
             {/* "Transfers" related components */}
             <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Transfermarkt <HelpIcon text={`Alle Spieler auf dem Transfermarkt. Hellblau hinterlegte Zeilen sind Free Agents, also direkt von Kickbase gelistet; alle anderen sind von Nutzern aus der Liga gelistet. 'Dein Gebot' zeigt dein laufendes Gebot und den Aufschlag auf den aktuellen Marktwert; ist keines abgegeben, steht dort grau das Gebot, das beim durchschnittlichen Zuwachs der letzten ${config.bepGrowthDays} Tage in ${config.bepTargetDays} Tagen Break-Even erreicht. Ein Klick macht das Feld editierbar und gibt das Gebot direkt bei Kickbase ab. Ein Ablaufdatum liefert Kickbase nur für die eigenen Angebote. 'Tage bis BEP' sind die Tage, die der Marktwert beim Zuwachs der letzten ${config.bepGrowthDays} Tage braucht, um den Preis einzuholen; ein Strich heißt, dass der Marktwert gerade nicht steigt. Neben jeder Euro-Spalte steht derselbe Zuwachs relativ zum aktuellen Marktwert. 'Verdeckte Bieter', 'Mindestgebot' und 'Zwangsverkauf droht' rechnen mit den geschätzten Budgets aus den Balances - Kickbase verrät weder Kontostände noch wer bietet, also sind das Schätzungen; die Spaltenköpfe sagen jeweils, welche. Die Bieter-Übersicht über der Tabelle zeigt alle Manager nach geschätztem Maximalgebot.`}/></Typography>
+              <Typography variant="h4" sx={{ padding: "15px" }}>Transfermarkt <HelpIcon text={`Alle Spieler auf dem Transfermarkt. Hellblau hinterlegte Zeilen sind Free Agents, also direkt von Kickbase gelistet; alle anderen sind von Nutzern aus der Liga gelistet. 'Dein Gebot' zeigt dein laufendes Gebot und den Aufschlag auf den aktuellen Marktwert; ist keines abgegeben, steht dort grau das Gebot, das beim durchschnittlichen Zuwachs der letzten ${config.bepGrowthDays} Tage in ${config.bepTargetDays} Tagen Break-Even erreicht. Ein Klick macht das Feld editierbar und gibt das Gebot direkt bei Kickbase ab. Ein Ablaufdatum liefert Kickbase nur für die eigenen Angebote. 'Tage bis BEP' sind die Tage, die der Marktwert beim Zuwachs der letzten ${config.bepGrowthDays} Tage braucht, um den Preis einzuholen; ein Strich heißt, dass der Marktwert gerade nicht steigt. Neben jeder Euro-Spalte steht derselbe Zuwachs relativ zum aktuellen Marktwert. 'Verdeckte Bieter', 'Mindestgebot' und 'Zwangsverkauf droht' rechnen mit den geschätzten Budgets aus den Balances - Kickbase verrät weder Kontostände noch wer bietet, also sind das Schätzungen; die Spaltenköpfe sagen jeweils, welche. Die Bieter-Übersicht über der Tabelle zeigt alle Manager nach geschätztem Maximalgebot. 'Wahrscheinliche Mitbieter' schneidet diese Budgets mit dem bisherigen Kaufverhalten aus dem Manager-Dossier: Manager, die den Preis zahlen könnten und die öfter bei diesem Klub oder überwiegend in steigende Marktwerte kaufen. Die Spalte erscheint erst, wenn ein Scrape-Lauf die Manager-Profile geschrieben hat.`}/></Typography>
               <MarketTable />
             </Paper>
             <Paper sx={{ marginTop: "25px" }} elevation={5}>
@@ -255,6 +273,14 @@ function App() {
               <Typography variant="h4" sx={{ padding: "15px" }}>Battles <HelpIcon text="Herausragende Leistungen von Spielern in der Liga."/></Typography>
               <Battles />
             </Paper>        
+          </TabPanel>
+
+          <TabPanel sx={{ padding: 0 }} value="8">
+            {/* "Manager" related components */}
+            <Paper sx={{ marginTop: "25px"}} elevation={5}>
+              <Typography variant="h4" sx={{ padding: "15px" }}>Manager-Dossier <HelpIcon text="Pro Manager vier Kennzahlen aus den abgeschlossenen Transfers: Haltedauer, Aufschlag auf den Marktwert am Kauftag, Anteil der Käufe in einen steigenden Marktwert und die Lieblingsklubs - dazu das Aktivitätsfenster über den Tag. Zu jeder Kennzahl steht, auf wie vielen Transfers sie beruht; ohne Datenlage steht kein Wert, sondern 'keine Datenlage'. Rundläufe sind Spieler, die binnen einer Stunde wieder verkauft wurden - Bonus-Farming, und der Grund für sehr kurze Haltedauern. Die Daten schreibt die Stage 'manager_profiles' am Ende eines Scrape-Laufs."/></Typography>
+              <ManagerDossier />
+            </Paper>
           </TabPanel>
 
           <TabPanel sx={{ padding: 0 }} value="6">

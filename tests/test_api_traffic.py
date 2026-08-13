@@ -1,10 +1,12 @@
-"""Tests for the two places a run asked Kickbase for far more than it reads.
+"""Tests for the requests a run makes, and the one it must keep making in full.
 
   - team_value_per_match_day() called ranking() once per manager and match day. One
     ranking response already carries every manager's team value, so a 13 manager league
-    made 340 requests where 34 hold the same information.
-  - player_marketvalue() asked for /marketValue/365 for every player, every run, while
-    only the days back to START_DATE are ever read.
+    made 340 requests where 34 hold the same information. That saving stands.
+  - player_marketvalue() was narrowed to the days a run reads and had to be put back:
+    /marketValue/31 answered 200 with at most one point per player, which left every
+    delta in market_value_changes.json null. The window is a constant again, and these
+    tests hold it there - see miscellaneous.MARKET_VALUE_DAYS for the whole story.
 
     ./venv/bin/python tests/test_api_traffic.py
 """
@@ -13,7 +15,6 @@ import json
 import sys
 import tempfile
 
-from datetime import datetime, timedelta, timezone
 from os import environ, makedirs, path
 
 ### Make the repository root importable regardless of where this is run from
@@ -64,43 +65,46 @@ class FakeResponse:
 
 
 ### ===============================================================================
-### market_value_days()
+### MARKET_VALUE_DAYS
+###
+### This is a tripwire, not a law. The window may be narrowed again - but only after a
+### manual request against the live API has shown that the narrower one answers with a
+### full curve, because the last attempt did not:
+###
+###   Phase 0 made the window grow with the season, which meant 31 days early on.
+###   Kickbase answered every /marketValue/31 of 2026-08-13 with HTTP 200 and at most one
+###   point, so all 466 curves in market_value_changes.json came out null, 1935 sell
+###   transfers found no market value on START_DATE, and 55 of 172 taken players ended up
+###   at a buy price of 0. Nothing in the logs says why.
+###
+### Whoever moves the window changes the number below and reads this first.
 ### ===============================================================================
 
 
-def days_after_start(days):
-    """The instant `days` days after START."""
-    return datetime.fromisoformat(START.replace("Z", "+00:00")) + timedelta(days=days)
+def test_the_window_is_the_full_year():
+    assert miscellaneous.MARKET_VALUE_DAYS == 365, \
+        f"got {miscellaneous.MARKET_VALUE_DAYS} - read the note above this test"
 
 
-def test_a_young_season_still_asks_for_the_delta_window():
-    """market_value_deltas() reads 31 entries whatever the season length."""
+def test_the_window_does_not_depend_on_the_season_or_the_run():
+    """A window that varied per run is what produced the empty curves. One value, always -
+    which is also what lets the disk cache validate an entry against it."""
     set_start_date(START)
-    assert miscellaneous.market_value_days(days_after_start(3)) == 31, \
-        f"got {miscellaneous.market_value_days(days_after_start(3))}"
+    fake = use_fake(lambda url: FakeResponse({"it": [{"dt": 1, "mv": 100}]}))
 
-
-def test_a_long_season_asks_back_to_the_start_date():
-    set_start_date(START)
-    ### 200 days in, plus the two days of slack around the START_DATE entry
-    assert miscellaneous.market_value_days(days_after_start(200)) == 202, \
-        f"got {miscellaneous.market_value_days(days_after_start(200))}"
-
-
-def test_the_window_never_exceeds_a_year():
-    set_start_date(START)
-    assert miscellaneous.market_value_days(days_after_start(900)) == 365, \
-        f"got {miscellaneous.market_value_days(days_after_start(900))}"
-
-
-def test_a_missing_start_date_falls_back_to_the_full_year():
-    """Asking for too much only costs bandwidth; too little would invent buy prices."""
-    set_start_date(None)
     try:
-        assert miscellaneous.market_value_days() == 365, \
-            f"got {miscellaneous.market_value_days()}"
+        leagues.player_marketvalue("token", "755")
+        set_start_date(None)
+        leagues.clear_caches()
+        leagues.player_marketvalue("token", "755")
     finally:
         set_start_date(START)
+        leagues.clear_caches()
+        http.reset_session()
+
+    windows = {url.rsplit("/", 1)[-1] for url in fake.urls}
+    assert windows == {str(miscellaneous.MARKET_VALUE_DAYS)}, \
+        f"expected one window whatever the season, got {sorted(windows)}"
 
 
 ### ===============================================================================
@@ -124,7 +128,7 @@ def use_fake(handler):
     return fake
 
 
-def test_the_requested_window_is_the_one_the_run_needs():
+def test_the_requested_window_is_the_one_the_constant_names():
     set_start_date(START)
     fake = use_fake(lambda url: FakeResponse({"it": [{"dt": 1, "mv": 100}]}))
 
@@ -132,51 +136,27 @@ def test_the_requested_window_is_the_one_the_run_needs():
         leagues.player_marketvalue("token", "755")
     finally:
         leagues.clear_caches()
+        http.reset_session()
 
-    assert fake.urls[0].endswith("/marketValue/365") is False, \
-        f"still asking for a full year: {fake.urls[0]}"
-    assert "/marketValue/31" in fake.urls[0], f"got {fake.urls[0]}"
+    assert fake.urls[0].endswith(f"/marketValue/{miscellaneous.MARKET_VALUE_DAYS}"), \
+        f"got {fake.urls[0]}"
 
 
-def test_a_window_kickbase_rejects_falls_back_to_a_year():
+def test_one_request_per_player_and_nothing_probed_first():
+    """The narrower window brought a per-run negotiation with it: one window tried, a
+    second one on the fallback path. With one window there is nothing to negotiate, and a
+    curve that cannot be had costs exactly one request."""
     set_start_date(START)
-
-    def handler(url):
-        if url.endswith("/marketValue/365"):
-            return FakeResponse({"it": [{"dt": 1, "mv": 100}]})
-        return FakeResponse({}, status_code=400)
-
-    fake = use_fake(handler)
-
-    try:
-        history = leagues.player_marketvalue("token", "755")
-    finally:
-        leagues.clear_caches()
-
-    assert history == [{"dt": 1, "mv": 100}], f"expected the fallback history, got {history}"
-    assert fake.urls[-1].endswith("/marketValue/365"), f"got {fake.urls}"
-
-
-def test_the_fallback_is_remembered_for_the_rest_of_the_run():
-    """Otherwise a rejected window costs one wasted request per player, not one per run."""
-    set_start_date(START)
-
-    def handler(url):
-        if url.endswith("/marketValue/365"):
-            return FakeResponse({"it": [{"dt": 1, "mv": 100}]})
-        return FakeResponse({}, status_code=400)
-
-    fake = use_fake(handler)
+    fake = use_fake(lambda url: FakeResponse({"it": [{"dt": 1, "mv": 100}]}))
 
     try:
         leagues.player_marketvalue("token", "755")
-        after_first = len(fake.urls)
         leagues.player_marketvalue("token", "756")
     finally:
         leagues.clear_caches()
+        http.reset_session()
 
-    assert after_first == 2, f"expected the rejected window plus the fallback, got {fake.urls}"
-    assert len(fake.urls) == 3, f"the second player probed the short window again: {fake.urls}"
+    assert len(fake.urls) == 2, f"expected one request per player, got {fake.urls}"
 
 
 def test_a_history_that_cannot_be_read_at_all_raises():
@@ -184,7 +164,7 @@ def test_a_history_that_cannot_be_read_at_all_raises():
     from backend import exceptions
 
     set_start_date(START)
-    use_fake(lambda url: FakeResponse({}, status_code=500))
+    fake = use_fake(lambda url: FakeResponse({}, status_code=400))
 
     try:
         leagues.player_marketvalue("token", "755")
@@ -196,23 +176,19 @@ def test_a_history_that_cannot_be_read_at_all_raises():
         leagues.clear_caches()
         http.reset_session()
 
+    assert len(fake.urls) == 1, f"a rejected request must not be repeated: {fake.urls}"
 
-def test_a_server_error_on_the_short_window_still_tries_the_full_year():
-    """A 500 is the likeliest way Kickbase says "I do not serve that".
 
-    The only evidence in this repository of how it answers for a resource it does not
-    have is the note in competitions.get_team_overview(): team ids 33 and 38 give a 500,
-    not a 404. So the shorter window - which nobody has been able to verify against the
-    live API - may well be rejected the same way, and reading that as an outage would
-    make the fallback unreachable.
+def test_a_server_error_is_a_real_outage():
+    """There is no second window to try, so the run must stop.
 
-    The cost of being wrong is one extra request per run; the cost of not trying would be
-    every run failing until somebody reads the log.
+    Swallowing this would hand every caller an empty history, and an empty history is
+    what invents buy prices of zero.
     """
     from backend import exceptions
 
     set_start_date(START)
-    fake = use_fake(lambda url: FakeResponse({}, status_code=500))
+    fake = use_fake(lambda url: FakeResponse({}, status_code=503))
 
     try:
         leagues.player_marketvalue("token", "755")
@@ -226,38 +202,11 @@ def test_a_server_error_on_the_short_window_still_tries_the_full_year():
         leagues.clear_caches()
         http.reset_session()
 
-    assert len(fake.urls) == 2, f"expected the short window and then the year, got {fake.urls}"
-    assert fake.urls[-1].endswith("/marketValue/365"), f"got {fake.urls}"
+    assert len(fake.urls) == 1, f"there is no second window to fall back to: {fake.urls}"
 
 
-def test_a_server_error_on_the_full_year_is_a_real_outage():
-    """Once the widest window fails there is nothing left to try, so the run must stop.
-
-    Swallowing this would hand every caller an empty history, and an empty history is
-    what invents buy prices of zero.
-    """
-    from backend import exceptions
-
-    set_start_date(START)
-    fake = use_fake(lambda url: FakeResponse({}, status_code=503))
-
-    try:
-        leagues.player_marketvalue("token", "755", days=365)
-    except exceptions.ApiUnavailableException:
-        pass
-    except Exception as e:
-        raise AssertionError(f"expected ApiUnavailableException, got {type(e).__name__}: {e}")
-    else:
-        raise AssertionError("expected ApiUnavailableException")
-    finally:
-        leagues.clear_caches()
-        http.reset_session()
-
-    assert len(fake.urls) == 1, f"there is no wider window to fall back to: {fake.urls}"
-
-
-def test_an_expired_token_is_never_read_as_an_unserved_window():
-    """Widening the window would spend a second request on a token that is simply gone."""
+def test_an_expired_token_travels_on_untouched():
+    """It is not an answer about the history, so it must not be read as one."""
     from backend import exceptions
 
     set_start_date(START)
@@ -275,7 +224,7 @@ def test_an_expired_token_is_never_read_as_an_unserved_window():
         leagues.clear_caches()
         http.reset_session()
 
-    assert len(fake.urls) == 1, f"an auth failure must not be retried wider: {fake.urls}"
+    assert len(fake.urls) == 1, f"an auth failure must not be retried: {fake.urls}"
 
 
 ### ===============================================================================
@@ -387,20 +336,19 @@ def test_a_manager_missing_from_a_ranking_has_no_team_value():
 ### ===============================================================================
 
 if __name__ == "__main__":
-    print("market_value_days()")
-    check("a young season still asks for the delta window", test_a_young_season_still_asks_for_the_delta_window)
-    check("a long season asks back to START_DATE", test_a_long_season_asks_back_to_the_start_date)
-    check("the window never exceeds a year", test_the_window_never_exceeds_a_year)
-    check("a missing START_DATE falls back to a year", test_a_missing_start_date_falls_back_to_the_full_year)
+    print("MARKET_VALUE_DAYS")
+    check("the window is the full year", test_the_window_is_the_full_year)
+    check("the window does not depend on the season or the run",
+          test_the_window_does_not_depend_on_the_season_or_the_run)
 
     print("\nplayer_marketvalue()")
-    check("the requested window is the one the run needs", test_the_requested_window_is_the_one_the_run_needs)
-    check("a rejected window falls back to a year", test_a_window_kickbase_rejects_falls_back_to_a_year)
-    check("the fallback is remembered for the run", test_the_fallback_is_remembered_for_the_rest_of_the_run)
+    check("the requested window is the one the constant names",
+          test_the_requested_window_is_the_one_the_constant_names)
+    check("one request per player and nothing probed first",
+          test_one_request_per_player_and_nothing_probed_first)
     check("an unreadable history raises", test_a_history_that_cannot_be_read_at_all_raises)
-    check("a 5xx on the short window still tries the year", test_a_server_error_on_the_short_window_still_tries_the_full_year)
-    check("a 5xx on the full year is a real outage", test_a_server_error_on_the_full_year_is_a_real_outage)
-    check("an expired token is never read as an unserved window", test_an_expired_token_is_never_read_as_an_unserved_window)
+    check("a 5xx is a real outage", test_a_server_error_is_a_real_outage)
+    check("an expired token travels on untouched", test_an_expired_token_travels_on_untouched)
 
     print("\nteam_value_per_match_day()")
     check("one ranking request per played match day", test_one_ranking_request_per_played_match_day)

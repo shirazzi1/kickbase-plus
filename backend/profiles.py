@@ -18,9 +18,8 @@ again - see market_values_from_run_cache(). What the cache cannot answer stays u
 a metric's "n" is the honest coverage, never a filled-in guess. The known gaps are
 
     -- a player who has left the competition is not in the cache at all,
-    -- the fetched window reaches back to START_DATE plus two days (see
-       miscellaneous.market_value_days()), so a buy in the first days of the season has no
-       7 day trend behind it to read,
+    -- the fetched window is miscellaneous.MARKET_VALUE_DAYS long, so a player whose curve
+       does not reach that far back has no 7 day trend behind an early buy to read,
     -- if market_value_changes() failed this run, the cache is empty and both market value
        metrics report n = 0 for everyone.
 

@@ -49,11 +49,14 @@ describe("ManagerStacks", () => {
         expect(warning).toBeTruthy()
         expect(screen.getByText(/3 Manager nach geschätztem Maximalgebot/)).toBeTruthy()
 
-        // All three affected columns are named, since all three claim something else than
-        // they mean while the flag is missing
+        // All four affected columns are named, since all four claim something else than
+        // they mean while the flag is missing. 'Wahrscheinliche Mitbieter' is one of them:
+        // without the flag the user is not taken out of the affordable set and can end up
+        // named as their own co-bidder.
         expect(warning.textContent).toMatch(/Verdeckte Bieter/)
         expect(warning.textContent).toMatch(/Mindestgebot/)
         expect(warning.textContent).toMatch(/Zwangsverkauf/)
+        expect(warning.textContent).toMatch(/Wahrscheinliche\s+Mitbieter/)
     })
 
     it("puts that warning where it can be seen, not inside the collapsed panel", () => {

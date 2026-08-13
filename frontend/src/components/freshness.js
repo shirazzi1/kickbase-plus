@@ -27,6 +27,7 @@ export const STAGE_BY_DATASET = {
     ts_team_values: "team_values",
     ts_league_user_stats: "league_user_stats",
     ts_manager_profiles: "manager_profiles",
+    ts_events: "events",
     ts_live_points: "live_points"
 }
 

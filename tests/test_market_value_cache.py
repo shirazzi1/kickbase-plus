@@ -147,7 +147,7 @@ def write_entry(player_id, **overrides):
         "version": market_value_cache.CACHE_VERSION,
         "playerId": str(player_id),
         "mvud": MVUD,
-        "days": 31,
+        "days": miscellaneous.MARKET_VALUE_DAYS,
         "fetchedAt": datetime.now(timezone.utc).isoformat(),
         "history": curve(),
     }
@@ -250,12 +250,12 @@ def test_yesterdays_newest_point_is_still_current():
 
 
 def test_a_window_narrower_than_the_run_needs_is_refetched():
-    """The run needs the curve back to START_DATE, and that window grows all season."""
+    """The runs of 2026-08-13 asked for 31 days and cached what came back. Those entries
+    cover a fraction of miscellaneous.MARKET_VALUE_DAYS, so they have to be refetched
+    instead of answering - which is how the cache heals itself after that window change."""
     write_entry("755", days=31)
     api = FakeApi()
 
-    ### A run 200 days into the season needs 202 days of curve
-    leagues._market_value_days = 202
     run_with(api, lambda: leagues.get_market("token", "1"))
     served = run_with(api, lambda: leagues.player_marketvalue("token", "755"))
 
@@ -264,8 +264,9 @@ def test_a_window_narrower_than_the_run_needs_is_refetched():
 
 
 def test_a_wider_cached_window_still_answers():
-    """A curve that fell back to the full year covers a 31 day run several times over."""
-    write_entry("755", days=365, history=curve(length=365))
+    """Only a narrower window is a reason to refetch. One that covers more than the run
+    asks for holds every point the run reads."""
+    write_entry("755", days=miscellaneous.MARKET_VALUE_DAYS + 30, history=curve(length=365))
     api = FakeApi()
 
     run_with(api, lambda: a_run(api, ["755"]))

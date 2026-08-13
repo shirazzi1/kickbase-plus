@@ -8,7 +8,7 @@ from sys import stdout
 from logging.config import dictConfig
 from datetime import datetime, timedelta, timezone
 
-from backend import exceptions, miscellaneous, profiles, runs
+from backend import events, exceptions, miscellaneous, profiles, runs
 from backend.kickbase.v4 import competitions, user, leagues
 from backend.paths import LOG_DIR, DATA_DIR, TIMESTAMP_DIR
 
@@ -129,6 +129,11 @@ def build_stages(user_token: str, selected_league: object, own_user_id: str) -> 
         ### the stages above wrote and the market value curves they left in the run cache,
         ### which is why it costs no API requests at all.
         ("manager_profiles", profiles.write_manager_profiles),
+        ### After every stage that appends to the history store, because it diffs this run's
+        ### snapshot against the previous one - and after turnovers(), whose all_transfers.json
+        ### is how "this manager bought nothing" is established. Derives only, costs no
+        ### requests.
+        ("events", events.write_events),
         # ("live_points", lambda: live_points(user_token, selected_league)), # needs to be run first to initialize the live_points.json file
     ]
 
@@ -486,6 +491,11 @@ def market_value_changes(user_token: str, selected_league: object) -> None:
 
             ### Create a custom json dict for every player
             players_LIST.append({
+                ### The row identity, and the only way an event derived from this file can
+                ### name the player it is about (see backend/events.py). Both fields were
+                ### already in hand, so this costs nothing; without it two snapshots can only
+                ### be matched on name and team.
+                "playerId": player_stats.get("i") or player["i"],
                 "teamId": player_stats["tid"],
                 "position": miscellaneous.POSITIONS[player_stats["pos"]],
                 "firstName": player_stats.get("fn", None), 
@@ -612,6 +622,14 @@ def taken_free_players(user_token: str, selected_league: object):
                     "lastName": player["n"],
                     "buyPrice": buy_price,
                     "marketValue": player["mv"],
+                    ### Saison-Gesamtpunkte aus derselben player_statistics()-Response, die oben
+                    ### schon für den Besitzer gelesen wird — also ohne einen einzigen zusätzlichen
+                    ### Request. taken_players wird historisiert (backend/miscellaneous.py), deshalb
+                    ### ergibt die Differenz zweier aufeinanderfolgender Snapshots die Punkte eines
+                    ### Spieltags pro Spieler. Die freien Spieler unten führen dasselbe "tp" unter
+                    ### dem älteren Namen "points"; der wird hier bewusst nicht angefasst, weil das
+                    ### Frontend darauf liest.
+                    "totalPoints": player_stats.get("tp", 0),
                     "status": player["st"],
                     "trend": player["mvt"],
                 })
