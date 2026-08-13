@@ -8,6 +8,7 @@ import requests
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 
@@ -17,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta, timezone
 from os import getenv, path, makedirs
 from zoneinfo import ZoneInfo
-from backend.paths import DATA_DIR, LAST_GOOD_DIR, TIMESTAMP_DIR
+from backend.paths import DATA_DIR, HISTORY_DIR, LAST_GOOD_DIR, TIMESTAMP_DIR
 
 from backend import exceptions
 from backend.kickbase import http
@@ -925,6 +926,222 @@ def season_is_over(now: datetime) -> bool:
     return parse_feed_timestamp(match_days[-1]["lastMatch"]) < now
 
 
+### Which datasets get a line appended to the history store on every write.
+###
+### The rule is: keep what only exists in the moment it was fetched, skip what can be
+### rebuilt or is already a history of its own.
+###
+###   - market: listings, bid counts and asking prices vanish the second a listing
+###     expires. Nothing anywhere can reconstruct yesterday's market.
+###   - market_value_changes: the API now serves 31 days of value curve instead of 365
+###     (Phase 0), so anything reading a longer curve depends on this store accumulating
+###     it. Every run not recorded is a hole that can never be filled.
+###   - balances: budgets, team values and max bids are computed from the feed plus
+###     estimates. Both the estimate and the inputs move, so "what did we believe about
+###     this manager's budget on Tuesday" is not derivable after the fact.
+###   - taken_players: who owned whom. The feed covers the transfers, but not a squad as
+###     it stood, and a reverted booking rewrites the derived history retroactively.
+###
+### Deliberately left out:
+###
+###   - STATIC_teams, STATIC_users, match_days: static or near static. A daily copy of the
+###     same 170 KB buys nothing.
+###   - all_transfers, turnovers, revenue_sum, team_values, league_user_stats,
+###     achievements: already cumulative, and derived from the activity feed, which
+###     Kickbase backfills on request. Snapshotting a list that grows all season, six times
+###     a day, costs quadratic disk for information the feed hands out for free.
+###   - free_players: a player only matters once they are listed, and then market covers
+###     them.
+###   - live_points: rewritten continuously during a matchday by app.py, so six snapshots
+###     a day are neither a history nor current. The live swing meter needs a cadence of
+###     its own, not this one.
+###   - every ts_ file: it records when a write happened, which the "ts" of the history
+###     line already says.
+HISTORICISED_DATASETS = frozenset({
+    "market",
+    "market_value_changes",
+    "balances",
+    "taken_players",
+})
+
+
+### The zone to fall back on when TZ is unset or unusable. Same default the rest of the
+### project assumes.
+DEFAULT_TIMEZONE = "Europe/Berlin"
+
+
+def history_timezone() -> ZoneInfo:
+    """### The timezone the history store files its lines under.
+
+    Resolves TZ, and falls back to DEFAULT_TIMEZONE rather than raising when it cannot be
+    used. Three ways it cannot:
+
+      - `TZ=""`. getenv() hands back the empty string, not the default, and ZoneInfo("")
+        raises ValueError.
+      - `TZ` in POSIX form, e.g. "CET-1CEST,M3.5.0,M10.5.0/3". Legal for libc, and the
+        tzdata lookup raises ZoneInfoNotFoundError - which subclasses KeyError, so it
+        slips past a handler that only expects OSError and friends.
+      - A plain typo, or a container image with no tzdata installed at all.
+
+    A wrong-by-an-hour boundary between two day files is a rounding error at the edge of a
+    day. A raised exception here used to cost the whole line, and the store has no backfill,
+    so falling back is strictly the better trade.
+
+    Returns:
+        ZoneInfo: The app timezone, or DEFAULT_TIMEZONE if TZ cannot be resolved.
+    """
+    ### "or", not getenv's default argument: an empty TZ has to fall back too
+    name = getenv("TZ") or DEFAULT_TIMEZONE
+
+    try:
+        return ZoneInfo(name)
+    except Exception as e:
+        if name != DEFAULT_TIMEZONE:
+            logging.warning(
+                f"TZ '{name}' cannot be used to date the history store ({type(e).__name__}: "
+                f"{e}). Falling back to {DEFAULT_TIMEZONE}."
+            )
+            return ZoneInfo(DEFAULT_TIMEZONE)
+        raise
+
+
+def history_file_path(dataset: str, moment: datetime = None) -> str:
+    """### Where the history of one dataset for one day lives.
+
+    Kept as a function rather than spelled out at the call site because the diff engine
+    that reads this store has to agree with the writer on the layout, down to the date
+    format.
+
+    The date is the calendar date in the app timezone, and so is the "ts" of every line in
+    the file - one instant, one rendering, and the date part of a line always matches the
+    file it sits in. UTC would split the local day at 02:00, right between two scheduled
+    runs, so a "day" file would stop meaning a day of runs.
+
+    Args:
+        dataset (str): The dataset name without the ".json", e.g. "market".
+        moment (datetime): The instant to file the line under, normally now.
+
+    Raises:
+        ValueError: If the dataset name could not be used as a directory name. Refused
+            rather than sanitised: the name becomes a path segment, and the diff engine will
+            read this store by name, so a "../.." that quietly resolved would read and write
+            outside the mounted volume. Every real dataset name is plain word characters,
+            so nothing legitimate is turned away.
+
+    Returns:
+        str: The absolute path of the NDJSON file, whose directory may not exist yet.
+    """
+    if not dataset or not re.fullmatch(r"[A-Za-z0-9_-]+", dataset):
+        raise ValueError(
+            f"'{dataset}' cannot be a history dataset name: only letters, digits, "
+            "underscores and dashes, so the name can never leave HISTORY_DIR."
+        )
+
+    moment = moment or datetime.now(timezone.utc)
+    day = moment.astimezone(history_timezone())
+
+    return path.join(HISTORY_DIR, dataset, f"{day.strftime('%Y-%m-%d')}.ndjson")
+
+
+def _lacks_trailing_newline(file_path: str) -> bool:
+    """### Whether a history file ends mid-line, so the next append needs its own newline.
+
+    Only true after an append was cut short - the host died between the write() and the
+    line reaching the disk. Appending straight onto that glues the broken half to an intact
+    line and produces one line that parses as neither, so a single crash would cost two
+    runs instead of one.
+
+    Args:
+        file_path (str): The history file about to be appended to.
+
+    Returns:
+        bool: False if the file does not exist or is empty, which is the normal case for
+            the first run of a day.
+    """
+    try:
+        if path.getsize(file_path) == 0:
+            return False
+    except OSError:
+        return False
+
+    with open(file_path, "rb") as f:
+        f.seek(-1, os.SEEK_END)
+        return f.read(1) != b"\n"
+
+
+def _append_history(file_name: str, data) -> None:
+    """### Append one snapshot of a dataset to its append-only history.
+
+    One line per run, `{"ts": ..., "rows": ...}`, where "rows" is the payload that was just
+    written verbatim. Verbatim matters: the point of the store is that a diff engine sees
+    exactly what the frontend saw, not a reduced version that has to be kept in sync with
+    the real one.
+
+    Called only after the main write has landed, which buys two things. The store never
+    records a payload that failed to reach disk, and the payload is known to serialise -
+    the same object was just dumped successfully.
+
+    A failure here is logged and shrugged off, the same deal as the .last-good snapshot: it
+    must never be the reason a run loses the data it fetched. The cost is a missing line,
+    and a missing line is what happens on a failed run anyway.
+
+    The append is a single write() to a file opened in append mode, so a line is either
+    fully there or not there at all, and a reader can skip a truncated last line. os.replace
+    is no help here - rewriting the whole file to add a line is what the append-only shape
+    exists to avoid.
+
+    Args:
+        file_name (str): The data file that was just written, e.g. "market.json".
+        data (any): The payload that was written.
+    """
+    dataset = file_name[:-len(".json")] if file_name.endswith(".json") else file_name
+
+    if dataset not in HISTORICISED_DATASETS:
+        return
+
+    ### Everything below is inside the try, and the try catches Exception rather than a list
+    ### of the failures that came to mind. The caller has already replaced the data file at
+    ### this point, so anything that escapes from here reports a write that did happen as a
+    ### stage that failed - a lie in the manifest, and a lie in the direction of "restart it"
+    ### rather than "look at it". Resolving TZ used to sit outside this block and could raise
+    ### ZoneInfoNotFoundError, which is a KeyError and slipped past a narrow handler twice
+    ### over.
+    try:
+        now = datetime.now(history_timezone())
+        file_path = history_file_path(dataset, now)
+
+        ### Built in full before the file is opened, so a serialisation failure cannot
+        ### leave half a line behind
+        line = json.dumps({"ts": now.isoformat(), "rows": data}, separators=(",", ":")) + "\n"
+
+        makedirs(path.dirname(file_path), exist_ok=True)
+
+        ### A file that ends mid-line is the fingerprint of an append cut short. Starting a
+        ### fresh line keeps that damage confined to the one broken line instead of taking
+        ### the next intact one down with it.
+        if _lacks_trailing_newline(file_path):
+            logging.warning(
+                f"The {dataset} history for today ends mid-line, so an earlier append was "
+                "cut short. Starting a new line; the broken one stays unreadable."
+            )
+            line = "\n" + line
+
+        with open(file_path, "a") as f:
+            f.write(line)
+            ### The store has no backfill. A line that only ever reached the page cache is
+            ### a line lost for good if the host goes down, so it goes to the disk now.
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception as e:
+        logging.warning(
+            f"Could not append {dataset} to the history store, carrying on: "
+            f"{type(e).__name__}: {e}"
+        )
+        return
+
+    logging.debug(f"Appended a {dataset} snapshot to {file_path}")
+
+
 def write_json_to_file(data, file_name: str) -> None:
     """Writes a JSON object to a file.
 
@@ -937,6 +1154,11 @@ def write_json_to_file(data, file_name: str) -> None:
     Before a data file is replaced, its previous content is snapshotted (see
     _snapshot_last_good). A failure is raised rather than logged: this used to swallow
     every write error and let the run report success over a file that was never written.
+
+    After the file has landed, the datasets listed in HISTORICISED_DATASETS get the same
+    payload appended to their append-only history (see _append_history). This is the one
+    funnel every dataset already passes through, which is why the history hangs off it
+    rather than off thirteen call sites that would each have to remember.
 
     Args:
         data (any): data to be written to the file
@@ -986,6 +1208,10 @@ def write_json_to_file(data, file_name: str) -> None:
         raise
 
     logging.debug(f"Wrote {file_name}")
+
+    ### Strictly after the replace, and outside the try above: the history records what is
+    ### on disk, and it must not be able to turn a successful write into a raised failure
+    _append_history(file_name, data)
 
 
 def write_timestamp(file_name: str, rows: int = None) -> None:

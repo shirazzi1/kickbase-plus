@@ -18,6 +18,7 @@ This is a hobby project to test stuff with JSON and the cores of Python. Feel fr
 ##### Table of Contents
 - [Screenshots](#screenshots)
 - [Docker](#docker)
+  - [Persistent data](#persistent-data)
   - [docker run](#docker-run)
   - [Docker Compose](#docker-compose)
   - [Health check](#health-check)
@@ -61,6 +62,30 @@ If you want to run this in a Docker container, you'll first need to set some man
 > The live points feature is currently on-hold and not present as of v2.4.0!
 > To handle the re-implementation of the live points with more ease, the ports for the backend are not commented out.
 
+### Persistent data
+**Mount `/code/data`.** Everything the container cannot fetch again lives there, and
+without the mount it is deleted on every image pull:
+
+| Path | What it holds |
+| --- | --- |
+| `/code/data/history/<dataset>/<YYYY-MM-DD>.ndjson` | The append-only history: one line per run per dataset, `{"ts": ..., "rows": ...}`. |
+| `/code/data/last-good/` | The previous copy of each data file, kept before it is overwritten. |
+
+The history is the part that cannot be recovered. Kickbase serves 31 days of market value
+curve and nothing at all about yesterday's transfer market, so the only record of what was
+listed, at what price, with how many bids, is the one this container writes. A run that was
+never recorded is a hole in the record for good - which is why this is a mount and not an
+optional extra.
+
+It grows by roughly **2-3 MiB a day** at the default schedule of six runs (about 70 MiB a
+month, under 1 GiB over a full season). No rotation or pruning happens: at that size the
+data is worth more than the disk. If it ever needs to shrink, the day files are independent
+and compress to about a tenth of their size, so `gzip` on everything older than a week is
+the obvious first move.
+
+Everything else - the JSON the frontend reads, the logs - is rebuilt by the next scheduled
+run and does not need a mount.
+
 ### docker run
 ```bash
 docker run -d \
@@ -71,6 +96,7 @@ docker run -d \
     -e KB_PASSWORD=<kickbase_password> \
     -e DISCORD_WEBHOOK=<discord_webhook> \
     -e START_DATE=<start_timestamp> \
+    -v <your_folder>/kickbase-data:/code/data \
     ghcr.io/casudo/kickbase-insights:latest
 ```  
 `<start_timestamp>` is an ISO 8601 timestamp in UTC, e.g. `2026-08-01T18:00:00Z`.  
@@ -92,6 +118,10 @@ services:
       - KB_PASSWORD=<kickbase_password>
       - DISCORD_WEBHOOK=<discord_webhook>
       - START_DATE=<start_timestamp> # ISO 8601 in UTC, e.g. 2026-08-01T18:00:00Z
+    volumes:
+      # The append-only history and the last-good snapshots. Without this they are
+      # deleted on every image pull, and the history cannot be fetched again.
+      - <your_folder>/kickbase-data:/code/data
 ```  
 
 ### Health check

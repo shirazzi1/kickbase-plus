@@ -52,19 +52,23 @@ class TempDirs:
         self.data_dir = path.join(root, "data")
         self.ts_dir = path.join(self.data_dir, "timestamps")
         self.last_good_dir = path.join(root, "last-good")
+        ### Redirected as well, otherwise every write in here appends a line to the real
+        ### history store in the repository
+        self.history_dir = path.join(root, "history")
         makedirs(self.ts_dir, exist_ok=True)
 
         self.original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-                         miscellaneous.LAST_GOOD_DIR)
+                         miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR)
         miscellaneous.DATA_DIR = self.data_dir
         miscellaneous.TIMESTAMP_DIR = self.ts_dir
         miscellaneous.LAST_GOOD_DIR = self.last_good_dir
+        miscellaneous.HISTORY_DIR = self.history_dir
 
         return self
 
     def __exit__(self, *exc):
         (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-         miscellaneous.LAST_GOOD_DIR) = self.original
+         miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR) = self.original
         self.tmp.cleanup()
         return False
 

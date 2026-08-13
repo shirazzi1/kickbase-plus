@@ -11,8 +11,10 @@ node_modules/
 logs/
 frontend/build/
 
-### Snapshots of the previous good copy of each data file. The names end in .last-good
-### rather than .json, so the wholesale *.json rule above does not cover them.
+### Runtime state that has to survive an image pull: the .last-good snapshots and the
+### append-only history store. Neither is covered by the wholesale *.json rule above -
+### the snapshots end in .last-good, the history in .ndjson - so the directory is ignored
+### as a whole. This is also the directory the README tells you to mount.
 ### Anchored: without the leading slash this would also match frontend/src/data.
 /data/
 

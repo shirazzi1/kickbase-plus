@@ -178,12 +178,13 @@ def test_owned_player_lands_in_taken_not_free():
         stats_by_id = {"14300": OWNED_PLAYER, "173": FREE_PLAYER_LISTED_UNOWNED}
 
         original = (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-                    miscellaneous.LAST_GOOD_DIR,
+                    miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
                     leagues.transfers, leagues.player_statistics, leagues.player_marketvalue)
         main.DATA_DIR = data_dir
         miscellaneous.DATA_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
+        miscellaneous.HISTORY_DIR = path.join(tmp, "history")
 
         try:
             environ["START_DATE"] = "2026-08-01T18:00:00Z"
@@ -203,7 +204,7 @@ def test_owned_player_lands_in_taken_not_free():
                 free = json.load(f)
         finally:
             (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-             miscellaneous.LAST_GOOD_DIR,
+             miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
              leagues.transfers, leagues.player_statistics,
              leagues.player_marketvalue) = original
 

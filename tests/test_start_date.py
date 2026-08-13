@@ -183,13 +183,14 @@ def test_turnovers_cleans_pre_cutoff_events_from_the_cache():
 
         ### Point every writer at the temporary directory
         original = (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-                    miscellaneous.LAST_GOOD_DIR,
+                    miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
                     leagues.transfers, leagues.player_statistics,
                     leagues.player_marketvalue, miscellaneous.calculate_revenue_data_daily)
         main.DATA_DIR = data_dir
         miscellaneous.DATA_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
+        miscellaneous.HISTORY_DIR = path.join(tmp, "history")
 
         try:
             ### A stale cache with one pre-reset and one post-reset event
@@ -222,7 +223,7 @@ def test_turnovers_cleans_pre_cutoff_events_from_the_cache():
                 cache = json.load(f)
         finally:
             (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-             miscellaneous.LAST_GOOD_DIR,
+             miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
              leagues.transfers, leagues.player_statistics,
              leagues.player_marketvalue, miscellaneous.calculate_revenue_data_daily) = original
 
@@ -250,10 +251,11 @@ def test_revenue_graph_accepts_an_iso_start_date():
             json.dump({"u1": "UserA"}, f)
 
         original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-                    miscellaneous.LAST_GOOD_DIR)
+                    miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR)
         miscellaneous.DATA_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
+        miscellaneous.HISTORY_DIR = path.join(tmp, "history")
 
         try:
             set_start_date("2026-08-01T18:00:00Z")
@@ -267,7 +269,7 @@ def test_revenue_graph_accepts_an_iso_start_date():
                 result = json.load(f)
         finally:
             (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-             miscellaneous.LAST_GOOD_DIR) = original
+             miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR) = original
 
     assert "UserA" in result, f"expected a series for UserA, got {result}"
     assert len(result["UserA"]) > 0, "expected at least one data point"
