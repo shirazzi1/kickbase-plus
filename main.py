@@ -8,7 +8,7 @@ from sys import stdout
 from logging.config import dictConfig
 from datetime import datetime, timedelta, timezone
 
-from backend import exceptions, miscellaneous
+from backend import exceptions, miscellaneous, runs
 from backend.kickbase.v4 import competitions, user, leagues
 from backend.paths import LOG_DIR, DATA_DIR, TIMESTAMP_DIR
 
@@ -98,10 +98,45 @@ def build_logging_config(log_dir: str) -> dict:
     }
 
 
-def main() -> None:
+def build_stages(user_token: str, selected_league: object, own_user_id: str) -> list:
+    """### The stages of a run, in the order they have to happen.
+
+    The order is not free. market_value_changes() writes STATIC_users.json and
+    STATIC_teams.json, which four later stages open; balances() reads the turnovers.json
+    that turnovers() wrote on the previous run. A stage that fails therefore costs the
+    stages behind it that depend on its files - but they fail on their own and say so,
+    instead of never running at all.
+
+    Args:
+        user_token (str): The user's kkstrauth token.
+        selected_league (object): The league to gather data for.
+        own_user_id (str): The logged in user's ID.
+
+    Returns:
+        list: (name, callable) pairs. The names are what the manifest and the frontend
+            know each stage by, so they are part of the contract.
+    """
+    return [
+        ("gift", lambda: get_gift(user_token)),
+        ("market", lambda: market(user_token, selected_league, own_user_id)),
+        ("market_value_changes", lambda: market_value_changes(user_token, selected_league)),
+        ("taken_free_players", lambda: taken_free_players(user_token, selected_league)),
+        ("balances", lambda: balances(user_token, selected_league)),
+        ("turnovers", lambda: turnovers(user_token, selected_league)),
+        ("team_values", lambda: team_value_per_match_day(user_token, selected_league)),
+        ("league_user_stats", lambda: league_user_stats_tables(user_token, selected_league)),
+        # ("live_points", lambda: live_points(user_token, selected_league)), # needs to be run first to initialize the live_points.json file
+    ]
+
+
+def main() -> runs.RunManifest:
     """### This is the main function of the Kickbase Insights program.
 
     It performs various tasks related to logging, user login, and data retrieval from the Kickbase API.
+
+    Returns:
+        runs.RunManifest: What every stage of this run did. The caller writes it out and
+            decides the exit code from it.
     """
     ### Ensure directories exist
     makedirs(LOG_DIR, exist_ok=True)
@@ -110,6 +145,10 @@ def main() -> None:
     ### Configure logging with the settings from the dictionary
     dictConfig(build_logging_config(LOG_DIR))
 
+    run_id = runs.start_run()
+    manifest = runs.RunManifest(run_id)
+    logging.info(f"Run {run_id} starting.")
+
     ### Validate START_DATE before doing any work.
     ### entrypoint.py checks this for Docker runs, but running main.py directly skips
     ### that check and would only fail minutes later, in turnovers().
@@ -117,42 +156,31 @@ def main() -> None:
         miscellaneous.get_start_datetime()
     except exceptions.KickbaseException as e:
         logging.error(f"{e} Exiting...")
-        exit(1)
+        manifest.finish()
+        return manifest
 
     ### Start every run with empty API caches, so a long lived process (app.py) never
     ### serves data from a previous run
     leagues.clear_caches()
 
+    ### The login is not a stage. Every stage needs the token it returns, so there is
+    ### nothing to isolate: without it the run has not begun.
     try:
         selected_league, user_token, own_user_id = login()
+    except (exceptions.LoginException, exceptions.KickbaseException) as e:
+        logging.error(f"Login failed, no stage can run: {e}")
+        manifest.finish()
+        return manifest
 
-        ### Get the daily login gift in every available league
-        get_gift(user_token)
+    ### Each stage on its own. One that fails costs its own datasets and nothing else,
+    ### and the manifest says which ones those were.
+    for name, stage in build_stages(user_token, selected_league, own_user_id):
+        manifest.run(name, stage)
 
-        market(user_token, selected_league, own_user_id)
-        market_value_changes(user_token, selected_league)
+    manifest.finish()
 
-        taken_free_players(user_token, selected_league)
+    return manifest
 
-        balances(user_token, selected_league)
-
-        turnovers(user_token, selected_league)
-
-        team_value_per_match_day(user_token, selected_league)
-
-        league_user_stats_tables(user_token, selected_league)
-
-        # live_points(user_token, selected_league) # needs to be run first to initialize the live_points.json file
-    except exceptions.LoginException as e:
-        print(e)
-        return
-    except exceptions.NotificatonException as e:
-        print(e)
-        return
-    except exceptions.KickbaseException as e:
-        print(e)
-        return
-    
 
 def login() -> tuple:
     """### Logs in to Kickbase and gathers various information.
@@ -325,7 +353,7 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
 
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(players_on_the_market, "market.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_market.json")
+    miscellaneous.write_timestamp("ts_market.json", rows=len(players_on_the_market))
 
 
 def market_value_changes(user_token: str, selected_league: object) -> None:
@@ -389,7 +417,7 @@ def market_value_changes(user_token: str, selected_league: object) -> None:
 
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(players_LIST, "market_value_changes.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_market_value_changes.json")
+    miscellaneous.write_timestamp("ts_market_value_changes.json", rows=len(players_LIST))
 
 
 def taken_free_players(user_token: str, selected_league: object):
@@ -513,11 +541,11 @@ def taken_free_players(user_token: str, selected_league: object):
     
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(taken_players, "taken_players.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_taken_players.json")
+    miscellaneous.write_timestamp("ts_taken_players.json", rows=len(taken_players))
 
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(free_players, "free_players.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_free_players.json")
+    miscellaneous.write_timestamp("ts_free_players.json", rows=len(free_players))
 
 
 def turnovers(user_token: str, selected_league: object) -> None:
@@ -729,7 +757,7 @@ def turnovers(user_token: str, selected_league: object) -> None:
 
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(final_turnovers, "turnovers.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_turnovers.json")
+    miscellaneous.write_timestamp("ts_turnovers.json", rows=len(final_turnovers))
 
     ### Calculate revenue data for the graph
     miscellaneous.calculate_revenue_data_daily(final_turnovers)
@@ -784,7 +812,7 @@ def team_value_per_match_day(user_token: str, selected_league: object) -> None:
 
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(final_team_value, "team_values.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_team_values.json")
+    miscellaneous.write_timestamp("ts_team_values.json", rows=len(final_team_value))
 
 
 def league_user_stats_tables(user_token: str, selected_league: object) -> None:
@@ -856,7 +884,7 @@ def league_user_stats_tables(user_token: str, selected_league: object) -> None:
 
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(final_user_stats, "league_user_stats.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_league_user_stats.json")
+    miscellaneous.write_timestamp("ts_league_user_stats.json", rows=len(final_user_stats))
 
 
 def live_points(user_token: str, selected_league: object) -> list:
@@ -910,7 +938,7 @@ def live_points(user_token: str, selected_league: object) -> list:
 
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(final_live_points, "live_points.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_live_points.json")
+    miscellaneous.write_timestamp("ts_live_points.json", rows=len(final_live_points))
 
     return final_live_points
 
@@ -1090,7 +1118,7 @@ def balances(user_token: str, selected_league: object) -> None:
     ### Save to file + timestamp
     miscellaneous.write_json_to_file(final_balances, "balances.json")
     miscellaneous.write_json_to_file(earned_per_user, "achievements.json")
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_balances.json")
+    miscellaneous.write_timestamp("ts_balances.json", rows=len(final_balances))
 
 ### -------------------------------------------------------------------
 ### -------------------------------------------------------------------
@@ -1110,12 +1138,35 @@ if __name__ == "__main__":
 
     start_time = time.time()
 
-    main()
+    manifest = main()
 
-    ### Timestamp for frontend
-    miscellaneous.write_json_to_file({"time": datetime.now().isoformat()}, "ts_main.json")
+    ### The manifest first: it is what the timestamp below now depends on.
+    miscellaneous.write_json_to_file(manifest.to_dict(), "ts_run_manifest.json")
+
+    ### Timestamp for frontend.
+    ###
+    ### This used to be written unconditionally, with nothing but the time in it. A run
+    ### that died at the first stage stamped itself as fresh and the frontend rendered it
+    ### green - so hours old market values were indistinguishable from current ones, and
+    ### the only way to find out was to notice the numbers had stopped moving.
+    ###
+    ### "time" therefore no longer means "the data is from now". It means "a run ended
+    ### now", and "allOk" says whether that run produced anything worth trusting.
+    miscellaneous.write_json_to_file({
+        "time": datetime.now().isoformat(),
+        "runId": manifest.run_id,
+        "allOk": manifest.all_ok,
+        "failedStages": manifest.failed_stages,
+    }, "ts_main.json")
+
+    runs.end_run()
 
     elapsed_time_seconds = time.time() - start_time
     minutes = int(elapsed_time_seconds // 60)
     seconds = int(elapsed_time_seconds % 60)
-    logging.info(f"DONE! Execution time: {minutes}m {seconds}s")
+    logging.info(f"DONE in {minutes}m {seconds}s. {manifest.summary()}")
+
+    ### The exit code is the other half of not lying. entrypoint.py runs this with
+    ### subprocess.run() and has never looked at the result; once it does, a failed run
+    ### can be seen from outside the container without reading a JSON file.
+    exit(0 if manifest.all_ok else 1)

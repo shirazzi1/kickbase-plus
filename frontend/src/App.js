@@ -8,6 +8,7 @@ import TabContext from "@mui/lab/TabContext"
 import TabList from "@mui/lab/TabList"
 import TabPanel from "@mui/lab/TabPanel"
 import Paper from "@mui/material/Paper"
+import Tooltip from "@mui/material/Tooltip"
 import Typography from "@mui/material/Typography"
 import { ThemeProvider, createTheme } from "@mui/material/styles"
 import CssBaseline from "@mui/material/CssBaseline"
@@ -47,6 +48,26 @@ import timestamp_revenue_sum from "./data/timestamps/ts_revenue_sum.json"
 import timestamp_league_user_stats from "./data/timestamps/ts_league_user_stats.json"
 // import timestamp_live_points from "./data/timestamps/ts_live_points.json"
 import timestamp_balances from "./data/timestamps/ts_balances.json"
+
+// What each stage of the last run did. Every timestamp above carries the id of the run
+// that wrote it, so this is what turns "there is a date here" into "this table is current".
+import run_manifest from "./data/timestamps/ts_run_manifest.json"
+
+import { datasetStatus, runStatus, runSummary, statusColour, statusLabel } from "./components/freshness"
+
+// The datasets shown in the Dev tab, in the order the run writes them
+const DATASETS = [
+    ["market", "Market", timestamp_market],
+    ["market_value_changes", "Market Value Changes", timestamp_market_value_changes],
+    ["taken_players", "Taken Players", timestamp_taken_players],
+    ["free_players", "Free Players", timestamp_free_players],
+    ["balances", "Balances", timestamp_balances],
+    ["turnovers", "Turnovers", timestamp_turnovers],
+    ["revenue_sum", "Revenue Sum", timestamp_revenue_sum],
+    ["team_values", "Team Values", timestamp_team_values],
+    ["league_user_stats", "League User Stats", timestamp_league_user_stats]
+    // ["live_points", "Live Points", timestamp_live_points]
+]
 
 // Create dark and light themes using Material-UI
 const darkTheme = createTheme({ palette: { mode: "dark" } })
@@ -126,7 +147,15 @@ function App() {
 
             <Grid item sx={{ textAlign: "right" }}>
               <Typography variant="button" style={{ color: "green" }}>{process.env.REACT_APP_VERSION || "development"}</Typography><br/>
-              <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_main.time).toLocaleString("de-DE")}</Typography>
+              {/* The colour follows the run, not the clock. It used to be green whatever
+                  happened, so a scraper that had been failing for two days looked exactly
+                  like one that had just finished. */}
+              <Tooltip title={runSummary(run_manifest)} arrow>
+                <Typography variant="button" style={{ color: statusColour(runStatus(run_manifest)), opacity: "0.7", cursor: "help" }}>
+                  {new Date(timestamp_main.time).toLocaleString("de-DE")}
+                  {runStatus(run_manifest) !== "current" && ` (${statusLabel(runStatus(run_manifest))})`}
+                </Typography>
+              </Tooltip>
             </Grid>
           </Grid>
 
@@ -238,20 +267,59 @@ function App() {
             <Paper sx={{ marginTop: "25px"}} elevation={5}>
               <Typography variant="h4" sx={{ padding: "15px" }}>Development</Typography>
 
-              {/* Display Timestamps of various JSON data files */}
-              <Typography variant="h6" sx={{ padding: "0px 15px 0px 15px" }}>Timestamps</Typography>
+              {/* What the last run did, stage by stage. This is the file that makes the
+                  timestamps below mean something: without it a date only says that some
+                  run ended, not that it produced anything. */}
+              <Typography variant="h6" sx={{ padding: "0px 15px 0px 15px" }}>Letzter Lauf</Typography>
               <Typography variant="body1" sx={{ padding: "0px 15px 15px 15px" }}>
-                Main: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_main.time).toLocaleString("de-DE")}</Typography><br/>
-                Market: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_market.time).toLocaleString("de-DE")}</Typography><br/>
-                Market Value Changes: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_market_value_changes.time).toLocaleString("de-DE")}</Typography><br/>
-                Taken Players: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_taken_players.time).toLocaleString("de-DE")}</Typography><br/>
-                Free Players: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_free_players.time).toLocaleString("de-DE")}</Typography><br/>
-                Turnovers: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_turnovers.time).toLocaleString("de-DE")}</Typography><br/>
-                Revenue Sum: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_revenue_sum.time).toLocaleString("de-DE")}</Typography><br/>
-                Team Values: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_team_values.time).toLocaleString("de-DE")}</Typography><br/>
-                League User Stats: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_league_user_stats.time).toLocaleString("de-DE")}</Typography><br/>
-                {/* Live Points: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_live_points.time).toLocaleString("de-DE")}</Typography><br/> */}
-                Balances: <Typography variant="button" style={{ color: "green", opacity: "0.7" }}>{new Date(timestamp_balances.time).toLocaleString("de-DE")}</Typography><br/>
+                Lauf: <Typography variant="button" style={{ opacity: "0.7" }}>{run_manifest.runId || "unbekannt"}</Typography><br/>
+                Ergebnis: <Typography variant="button" style={{ color: statusColour(runStatus(run_manifest)) }}>{runSummary(run_manifest)}</Typography><br/>
+                Beendet: <Typography variant="button" style={{ opacity: "0.7" }}>{new Date(timestamp_main.time).toLocaleString("de-DE")}</Typography>
+              </Typography>
+
+              <Typography variant="body1" component="div" sx={{ padding: "0px 15px 15px 15px" }}>
+                {(run_manifest.stages || []).map((stage) => (
+                  <div key={stage.name}>
+                    <Typography variant="button" style={{ color: statusColour(stage.status === "ok" ? "current" : "failed") }}>
+                      {stage.status === "ok" ? "✓" : "✗"} {stage.name}
+                    </Typography>
+                    <Typography variant="button" style={{ opacity: "0.7", marginLeft: "8px" }}>
+                      {stage.durationSeconds}s
+                    </Typography>
+                    {stage.error && (
+                      <Typography variant="body2" style={{ opacity: "0.7", marginLeft: "20px" }}>
+                        {stage.error}
+                      </Typography>
+                    )}
+                  </div>
+                ))}
+              </Typography>
+
+              {/* Display Timestamps of various JSON data files.
+                  Coloured per dataset, because per-stage isolation means they can disagree:
+                  a failed stage leaves its file exactly where it was, with a date that
+                  still looks perfectly reasonable. */}
+              <Typography variant="h6" sx={{ padding: "0px 15px 0px 15px" }}>Timestamps</Typography>
+              <Typography variant="body1" component="div" sx={{ padding: "0px 15px 15px 15px" }}>
+                {DATASETS.map(([name, label, stamp]) => {
+                  const status = datasetStatus(stamp, run_manifest, name)
+
+                  return (
+                    <div key={name}>
+                      {label}: <Typography variant="button" style={{ color: statusColour(status), opacity: "0.7" }}>
+                        {new Date(stamp.time).toLocaleString("de-DE")}
+                      </Typography>
+                      <Typography variant="button" style={{ color: statusColour(status), marginLeft: "8px" }}>
+                        {statusLabel(status)}
+                      </Typography>
+                      {stamp.rows !== undefined && (
+                        <Typography variant="button" style={{ opacity: "0.5", marginLeft: "8px" }}>
+                          {stamp.rows} Zeilen
+                        </Typography>
+                      )}
+                    </div>
+                  )
+                })}
               </Typography>
             </Paper>
           </TabPanel>          

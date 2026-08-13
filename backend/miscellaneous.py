@@ -7,6 +7,9 @@ TODO: Maybe list all functions here automatically?
 import requests
 import json
 import logging
+import os
+import shutil
+import tempfile
 
 import pandas as pd
 from collections import Counter
@@ -14,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta, timezone
 from os import getenv, path, makedirs
 from zoneinfo import ZoneInfo
-from backend.paths import DATA_DIR, TIMESTAMP_DIR
+from backend.paths import DATA_DIR, LAST_GOOD_DIR, TIMESTAMP_DIR
 
 from backend import exceptions
 from backend.kickbase import http
@@ -257,7 +260,7 @@ def calculate_revenue_data_daily(turnovers: dict) -> None:
 
     ### Save to file + timestamp
     write_json_to_file(data, "revenue_sum.json")
-    write_json_to_file({"time": datetime.now().isoformat()}, "ts_revenue_sum.json")
+    write_timestamp("ts_revenue_sum.json", rows=len(data))
 
 
 def get_player_owner(player_stats: dict, league_id: str) -> dict:
@@ -925,27 +928,157 @@ def season_is_over(now: datetime) -> bool:
 def write_json_to_file(data, file_name: str) -> None:
     """Writes a JSON object to a file.
 
+    The write is atomic: the data goes into a temporary file in the same directory, is
+    flushed to disk, and only then replaces the target. A crash halfway through therefore
+    leaves the previous file untouched instead of a truncated one - which mattered here
+    more than usual, because the target directory is the one the dev server watches, so
+    half a file was compiled into the bundle and blanked the whole UI.
+
+    Before a data file is replaced, its previous content is snapshotted (see
+    _snapshot_last_good). A failure is raised rather than logged: this used to swallow
+    every write error and let the run report success over a file that was never written.
+
     Args:
         data (any): data to be written to the file
         file_name (str): file name
+
+    Raises:
+        OSError: The file could not be written.
     """
+    ### Check if it is a data or timestamp file
+    if file_name.startswith("ts_"):
+        target_dir, indent = TIMESTAMP_DIR, None
+    else:
+        target_dir, indent = DATA_DIR, 2
+
     ### Make sure the data directories exist, since app.py can write files before main.py ever ran
     makedirs(TIMESTAMP_DIR, exist_ok=True)
+    makedirs(target_dir, exist_ok=True)
 
-    ### Check if it is a data or timestamp file
+    file_path = path.join(target_dir, file_name)
+
+    if target_dir == DATA_DIR:
+        _snapshot_last_good(file_path, file_name)
+
+    ### The temporary file has to sit in the target directory: os.replace() is only atomic
+    ### within one filesystem, and a volume mount elsewhere in the tree may well be another
+    ### one. The leading dot keeps it out of the way of anything globbing for *.json.
+    handle, temp_path = tempfile.mkstemp(dir=target_dir, prefix=f".{file_name}.", suffix=".tmp")
+
     try:
-        if file_name.startswith("ts_"):
-            file_path = path.join(TIMESTAMP_DIR, file_name)
-            with open(file_path, "w") as f:
-                json.dump(data, f)
-            logging.debug(f"Created timestamp file {file_name}")
-        else:
-            file_path = path.join(DATA_DIR, file_name)
-            with open(file_path, "w") as f:
-                json.dump(data, f, indent=2)
-            logging.debug(f"Created file {file_name}")
-    except Exception as e:
-        logging.error(f"Failed to write JSON to {file_path}: {e}")
+        with os.fdopen(handle, "w") as f:
+            json.dump(data, f, indent=indent)
+            ### Flush all the way to the disk before the rename claims the data is there
+            f.flush()
+            os.fsync(f.fileno())
+
+        os.replace(temp_path, file_path)
+    except Exception:
+        _remove_quietly(temp_path)
+        raise
+
+    logging.debug(f"Wrote {file_name}")
+
+
+def write_timestamp(file_name: str, rows: int = None) -> None:
+    """### Stamp a dataset with the moment and the run that produced it.
+
+    The run id is what keeps per-stage isolation honest. Without it a dataset that its
+    stage failed to rewrite still carries a plausible timestamp from some earlier run, and
+    the frontend has no way to tell that apart from data written seconds ago. With it,
+    "this table is older than the rest" becomes a question the UI can answer per dataset.
+
+    "time" keeps its old name and meaning, so anything still reading only that keeps
+    working.
+
+    Args:
+        file_name (str): The timestamp file, e.g. "ts_market.json".
+        rows (int): How many rows the dataset holds, if the caller knows.
+    """
+    ### Imported here rather than at the top: backend.runs imports backend.exceptions,
+    ### which is fine, but this module is imported by almost everything and a cycle here
+    ### would be paid for everywhere.
+    from backend import runs
+
+    payload = {
+        "time": datetime.now().isoformat(),
+        "runId": runs.current_run_id(),
+    }
+
+    if rows is not None:
+        payload["rows"] = rows
+
+    write_json_to_file(payload, file_name)
+
+
+def _snapshot_last_good(file_path: str, file_name: str) -> None:
+    """### Keep the current content of a data file before it is overwritten.
+
+    The atomic write already rules out a truncated file. What it cannot rule out is a
+    stage that completes and writes something wrong - an empty list where 500 players
+    belong. The snapshot is what makes that recoverable by hand.
+
+    Only content that parses as JSON is kept, so a bad file never gets promoted to being
+    the good one. A snapshot that fails is logged and shrugged off: it must never be the
+    reason a run cannot write its data.
+
+    Args:
+        file_path (str): The file about to be replaced.
+        file_name (str): Its name, used for the snapshot.
+    """
+    if not path.exists(file_path):
+        return
+
+    try:
+        with open(file_path, "r") as f:
+            json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logging.debug(f"Not snapshotting {file_name}, it does not parse: {e}")
+        return
+
+    try:
+        makedirs(LAST_GOOD_DIR, exist_ok=True)
+        shutil.copyfile(file_path, path.join(LAST_GOOD_DIR, f"{file_name}.last-good"))
+    except OSError as e:
+        logging.warning(f"Could not snapshot the previous {file_name}: {e}")
+
+
+def _remove_quietly(file_path: str) -> None:
+    """### Delete a file, ignoring the case where it is already gone.
+
+    Args:
+        file_path (str): The file to remove.
+    """
+    try:
+        os.remove(file_path)
+    except OSError:
+        pass
+
+
+def read_last_good(file_name: str):
+    """### Read the snapshot taken before the last write of a data file.
+
+    Nothing calls this during a run - the point of the snapshot is that a human, or a
+    later restore step, has something to compare against. It lives here so the naming
+    stays in one place.
+
+    Args:
+        file_name (str): The data file's name, e.g. "market.json".
+
+    Returns:
+        The decoded JSON, or None if there is no readable snapshot.
+    """
+    snapshot_path = path.join(LAST_GOOD_DIR, f"{file_name}.last-good")
+
+    if not path.exists(snapshot_path):
+        return None
+
+    try:
+        with open(snapshot_path, "r") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logging.warning(f"Could not read the last good {file_name}: {e}")
+        return None
 
 
 def julian_to_date(julian_date: int) -> str:

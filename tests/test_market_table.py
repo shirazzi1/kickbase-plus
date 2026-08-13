@@ -257,9 +257,11 @@ def run_market():
         makedirs(ts_dir, exist_ok=True)
 
         original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+                    miscellaneous.LAST_GOOD_DIR,
                     leagues.get_market, leagues.player_statistics, leagues.player_marketvalue)
         miscellaneous.DATA_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
+        miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
 
         try:
             leagues.get_market = lambda token, lid: [Market_Players(p) for p in market_items]
@@ -275,7 +277,8 @@ def run_market():
             with open(path.join(data_dir, "market.json")) as f:
                 rows = json.load(f)
         finally:
-            (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR, leagues.get_market,
+            (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+             miscellaneous.LAST_GOOD_DIR, leagues.get_market,
              leagues.player_statistics, leagues.player_marketvalue) = original
 
     return {row["lastName"]: row for row in rows}
