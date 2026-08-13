@@ -8,6 +8,8 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 
 import { DataGrid } from '@mui/x-data-grid'
 
+import SwingMeter from './SwingMeter'
+
 // Import data
 import data from '../data/live_points.json'
 
@@ -76,6 +78,9 @@ function LivePoints() {
   // Step 4: Display the accordions and tables
     return (
         <Box>
+            {/* Above the per-manager tables: how much of the gap to one chosen rival is
+                already settled and how much is still on the pitch */}
+            <SwingMeter entries={data} />
             {userAccordions}
         </Box>
     );
