@@ -247,6 +247,46 @@ def test_a_missing_build_says_what_is_missing():
 
 
 ### ===============================================================================
+### The bid token the page is served with
+
+
+def test_the_index_hands_out_a_bid_token():
+    """The bid field's token used to reach Flask only through the CRA dev server's proxy.
+
+    There is no dev server in front of Flask any more, so the token had no carrier left and
+    every bid would have answered 401. index.html now arrives with a cookie holding a token
+    this process generated at boot, and the frontend puts it in the X-Bid-Token header.
+    """
+    with Deployment(build={"index.html": "<html/>"}) as d:
+        response = d.client.get("/")
+
+        cookie = response.headers.get("Set-Cookie", "")
+
+        assert flask_app.BID_TOKEN_COOKIE in cookie, f"got {cookie!r}"
+        assert flask_app.BOOT_BID_TOKEN in cookie, "the cookie must carry the boot token"
+
+
+def test_the_bid_token_cookie_is_readable_by_the_page():
+    """Deliberately not HttpOnly. The frontend has to read the value and put it in a header -
+    a cookie the browser attaches by itself would travel with a cross-site request too, which
+    is exactly what has to be prevented."""
+    with Deployment(build={"index.html": "<html/>"}) as d:
+        cookie = d.client.get("/").headers.get("Set-Cookie", "")
+
+        assert "HttpOnly" not in cookie, f"got {cookie!r}"
+        assert "SameSite=Strict" in cookie, f"got {cookie!r}"
+
+
+def test_the_bid_token_cookie_is_not_marked_secure():
+    """This is routinely served over plain HTTP on a LAN. A Secure cookie would never
+    arrive there, and every bid would be a 401 with no hint why."""
+    with Deployment(build={"index.html": "<html/>"}) as d:
+        cookie = d.client.get("/").headers.get("Set-Cookie", "")
+
+        assert "Secure" not in cookie, f"got {cookie!r}"
+
+
+### ===============================================================================
 ### What must not have changed
 
 
@@ -297,6 +337,11 @@ if __name__ == "__main__":
     check("a build asset is served", test_a_build_asset_is_served)
     check("an unknown path falls back to the app", test_an_unknown_path_falls_back_to_the_app)
     check("a missing build says what is missing", test_a_missing_build_says_what_is_missing)
+
+    print("\nthe bid token")
+    check("index.html hands out a bid token", test_the_index_hands_out_a_bid_token)
+    check("the page can read the cookie", test_the_bid_token_cookie_is_readable_by_the_page)
+    check("the cookie is not Secure", test_the_bid_token_cookie_is_not_marked_secure)
 
     print("\nwhat must not have changed")
     check("the health route still answers", test_the_health_route_still_answers)

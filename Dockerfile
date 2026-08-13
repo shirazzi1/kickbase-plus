@@ -34,8 +34,12 @@ FROM ubuntu
 WORKDIR /code
 COPY . /code/
 
-### Only the built frontend, not the sources it was built from. .dockerignore keeps
-### frontend/node_modules out of the COPY above; this brings back the one directory that matters.
+### The COPY above takes the whole context, frontend/src included - both stages share one
+### .dockerignore, so the sources cannot be excluded there without taking them away from the
+### stage that builds them. Dropped here instead: nothing in the runtime image executes
+### JavaScript, so the only thing from frontend/ that belongs in it is the built bundle.
+RUN rm -rf /code/frontend/src /code/frontend/public /code/frontend/node_modules
+
 COPY --from=frontend-build /build/build /code/frontend/build
 
 ### Make script executable

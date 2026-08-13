@@ -17,7 +17,8 @@ repo_pictures/
 ### Ignore auto generated files
 frontend/node_modules/
 ### The build stage runs "npm ci" against package-lock.json, so a build machine's copy would
-### only be copied in and then replaced.
+### only be copied in and then replaced. The stage's own output arrives through an explicit
+### COPY --from, which .dockerignore does not apply to.
 frontend/build/
 ### The old data directory. Nothing writes here any more - the datasets live in data/public
 ### and data/state - but a checkout that has run an older version still has it, and baking a

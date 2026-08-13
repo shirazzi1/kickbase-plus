@@ -119,7 +119,15 @@ export function useTimestampIndex({ pollInterval = POLL_INTERVAL_MS } = {}) {
 
     // The run the current data belongs to. A ref rather than state: it is a comparison, and
     // storing it in state would make the poll re-run the effect that schedules it.
+    //
+    // `seeded` is separate from it on purpose. Both were once the same null, which broke
+    // exactly the case this whole mechanism exists for: on a fresh volume the first answer
+    // carries no run at all, so `seenRunId` stayed null, so *every* poll took the "this is
+    // the first answer" branch - and when the first real run finally finished, its id was
+    // recorded without ever bumping the generation. The freshness chips went green and the
+    // tables stayed empty until someone reloaded the page.
     const seenRunId = useRef(null)
+    const seeded = useRef(false)
     const [attempt, setAttempt] = useState(0)
 
     const reload = useCallback(() => setAttempt((n) => n + 1), [])
@@ -139,11 +147,15 @@ export function useTimestampIndex({ pollInterval = POLL_INTERVAL_MS } = {}) {
 
                 const runId = index.run_manifest?.runId ?? index.main?.runId ?? null
 
-                // The first answer establishes what "current" is; it must not count as a
-                // change, or every mount would refetch everything twice.
-                if (seenRunId.current === null)
+                // The first answer establishes what "current" is - whatever it says, including
+                // "no run at all" - and must not count as a change, or every mount would
+                // refetch everything twice. Every answer after it is compared, and null is a
+                // value like any other here: null -> RUN-1 is the first finished run on a
+                // fresh volume, and it is precisely the moment the open tabs have to refetch.
+                if (!seeded.current) {
+                    seeded.current = true
                     seenRunId.current = runId
-                else if (runId && runId !== seenRunId.current) {
+                } else if (runId !== seenRunId.current) {
                     seenRunId.current = runId
                     setGeneration((n) => n + 1)
                 }
@@ -188,8 +200,10 @@ export function useTimestampIndex({ pollInterval = POLL_INTERVAL_MS } = {}) {
  *
  * `status` is LOADING until all of them have settled, ERROR if any of them failed, READY
  * otherwise - a missing file is not a failure. `data` is keyed by file name, with the shape's
- * empty value where a file is absent, so a caller can map over it without guarding first.
- * `missing` names the absent ones, for the components that want to say so.
+ * empty value where a file is absent *or where its fetch failed*, so a caller that renders
+ * anyway cannot crash on top of an error it has already been told about. `missing` names only
+ * the absent ones; `error` carries the first real failure's message, and a caller that wants
+ * to tell the two apart reads `status` rather than `data`.
  *
  * On a refetch the previous payloads stay in `data`. A reload that blanked the table it is
  * refreshing would be worse than the stale numbers it replaces.

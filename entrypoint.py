@@ -103,6 +103,8 @@ def check_environment():
     ### 10 2,6,10,14,18,22 * * * -> At minute 10 past every 4th hour starting from 2am
     START_DATE = getenv("START_DATE")
     START_MONEY = getenv("START_MONEY", "50000000")
+    BID_TOKEN = getenv("BID_TOKEN")
+    FLASK_PORT = getenv("FLASK_PORT", "5000")
 
     ### Display a welcoming message in Docker logs
     print("👍 Container started. Welcome!")
@@ -129,17 +131,49 @@ def check_environment():
     else:
         print("  ✅ DISCORD_WEBHOOK is set.")
 
+    ### The bid field's token. No longer required: app.py generates one per boot and hands
+    ### it to the browser as a cookie with index.html, because the only carrier it used to
+    ### have was the create-react-app dev server's proxy - which does not run in a container
+    ### any more. Refusing to start over a missing BID_TOKEN would now refuse over something
+    ### the server supplies itself.
+    ###
+    ### A value that *is* set stays accepted alongside the generated one, so a script or a
+    ### dev proxy that carries it keeps working. Announced rather than checked.
+    if BID_TOKEN:
+        print("  ✅ BID_TOKEN is set and will be accepted in addition to the per-boot token.")
+    else:
+        print("  ✅ Bid token is generated per start; no BID_TOKEN needed.")
+
     ### Check if RUN_SCHEDULE is using the default value
     if RUN_SCHEDULE == DEFAULT_RUN_SCHEDULE:
         print("  ✅ Using default value for RUN_SCHEDULE:", RUN_SCHEDULE)
     else:
         print("  ⚠️ RUN_SCHEDULE has been set to a custom value:", RUN_SCHEDULE)
 
+    ### Check if FLASK_PORT is using the default value
+    ### On macOS the AirPlay Receiver occupies port 5000 by default, so Flask cannot bind
+    ### there unless this is changed - see frontend/src/setupProxy.js for the matching
+    ### change on the frontend side.
+    if FLASK_PORT == "5000":
+        print("  ✅ Using default value for FLASK_PORT:", FLASK_PORT)
+    else:
+        print("  ⚠️ FLASK_PORT has been set to a custom value:", FLASK_PORT)
+
     ### Check if START_DATE is set by user.
     ### Uses the same parser as main.py so both agree on what a valid value is.
     try:
         miscellaneous.get_start_datetime()
         print(f"  ✅ START_DATE is set to '{START_DATE}'.")
+    except exceptions.KickbaseException as e:
+        print(f"  ❌ {e} Exiting...")
+        exit(1)
+
+    ### Check the break-even horizons, next to START_MONEY below. Same parser as
+    ### main.py, so both agree on what a valid value is.
+    try:
+        bep_growth_days, bep_target_days = miscellaneous.get_bep_days()
+        print(f"  ✅ Break-even horizons: {bep_growth_days} day growth average, "
+              f"{bep_target_days} day payback.")
     except exceptions.KickbaseException as e:
         print(f"  ❌ {e} Exiting...")
         exit(1)
@@ -153,10 +187,11 @@ def check_environment():
         print("  ❌ START_MONEY is not set to a valid value. Exiting...")
         exit(1)
 
-    return {"discord_webhook": DISCORD_WEBHOOK, "run_schedule": RUN_SCHEDULE}
+    return {"discord_webhook": DISCORD_WEBHOOK, "run_schedule": RUN_SCHEDULE,
+            "flask_port": FLASK_PORT}
 
 
-def build_children():
+def build_children(flask_port: str = DEFAULT_FLASK_PORT):
     """### The long lived process the container serves from.
 
     One, not two. There used to be a create-react-app dev server here as well, serving a
@@ -167,16 +202,18 @@ def build_children():
     The supervision itself is unchanged: whatever is in this list gets polled and restarted.
 
     Args:
-        None
+        flask_port (str): The port Flask binds to. Configurable because port 5000 is
+            occupied by the AirPlay Receiver on macOS by default - see the FLASK_PORT
+            check in check_environment() and frontend/src/setupProxy.js for the matching
+            change on the frontend side.
 
     Returns:
         list: The Flask API, not started yet.
     """
-    port = getenv("FLASK_PORT", DEFAULT_FLASK_PORT)
-
     return [
         supervisor.Child("flask api",
-                         ["python3", "-u", "-m", "flask", "run", "--host=0.0.0.0", f"--port={port}"],
+                         ["python3", "-u", "-m", "flask", "run", "--host=0.0.0.0",
+                          f"--port={flask_port}"],
                          cwd="/code"),
     ]
 
@@ -257,7 +294,13 @@ if __name__ == "__main__":
     ### Flask first, so the dashboard answers while the first run is still walking the
     ### competition. It used to come up last, four minutes and one npm install after the
     ### container started.
-    supervised = build_children()
+    ###
+    ### Nothing supervises it for the length of that first run: supervise() below is what
+    ### polls the children, and run_scraper() sits in front of it. A Flask that dies in
+    ### those minutes stays dead until the first run finishes, and is then restarted on the
+    ### next poll. Accepted rather than fixed here - moving the scrape into the loop is a
+    ### change to the supervisor's shape, and the loop already runs it on schedule.
+    supervised = build_children(settings["flask_port"])
 
     for child in supervised:
         child.start()

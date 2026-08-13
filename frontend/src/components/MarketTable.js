@@ -2,11 +2,15 @@ import { useEffect, useState } from "react"
 import Tooltip from "@mui/material/Tooltip"
 import Typography from "@mui/material/Typography"
 import Chip from "@mui/material/Chip"
-import { Box, alpha, useTheme } from "@mui/material"
-import PagedDataGrid from "./PagedDataGrid"
 import {
-    currencyFormatter,
+    Box, Button, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle,
+    Snackbar, Alert, alpha, useTheme
+} from "@mui/material"
+import PagedDataGrid from "./PagedDataGrid"
+import BidCell from "./BidCell"
+import {
     percentFormatter,
+    currencyFormatter,
     unsignedPercentFormatter,
     currencyOrDash,
     percentOrDash,
@@ -15,8 +19,11 @@ import {
     getStatusIcon
 } from "./SharedConstants"
 import {
+    BEP_DEFAULTS,
+    CONFIG_DATASET,
     relativeChange,
     daysToBreakEven,
+    breakEvenBid,
     formatDuration,
     elapsedSince,
     ownManager,
@@ -31,14 +38,16 @@ import {
     managerProfileList
 } from "./managerProfiles"
 import { useJsonFiles } from "../hooks/useJsonData"
+import { bidTokenHeader } from "./bidToken"
 import { dataGate } from "./DataState"
 
-// The three datasets this table joins. The listings are the table; the balances feed the
-// auction solver's three columns; the profiles feed the bidder chip. All three in one hook
-// call, so the table renders once rather than three times.
+// The four datasets this table joins. The listings are the table; the balances feed the
+// auction solver's three columns; the profiles feed the bidder chip; config carries the
+// break-even horizons a run was configured with. One hook call, so the table renders once
+// rather than four times.
 const MARKET = "market.json"
 const BALANCES = "balances.json"
-const DATASETS = [MARKET, BALANCES, PROFILES_DATASET]
+const DATASETS = [MARKET, BALANCES, PROFILES_DATASET, CONFIG_DATASET]
 
 const daysFormatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 })
 
@@ -93,7 +102,7 @@ const DISTRESS_LABELS = {
 function MarketTable() {
     const theme = useTheme()
 
-    const { status, data, missing, error, reload } = useJsonFiles(DATASETS)
+    const { status, data, missing, error: fetchError, reload } = useJsonFiles(DATASETS)
 
     const listings = data[MARKET]
     const balances = data[BALANCES]
@@ -107,6 +116,88 @@ function MarketTable() {
     // cannot answer anything rather than a league that has not traded.
     const profiles = data[PROFILES_DATASET]
     const hasProfiles = managerProfileList(profiles).length > 0
+
+    // The break-even horizons a run was configured with. Merged over the backend's own
+    // defaults, so the suggested bid is computed against 3 days rather than against
+    // `undefined` in the moment before the file lands.
+    const config = { ...BEP_DEFAULTS, ...(data[CONFIG_DATASET] ?? {}) }
+
+    // The editing state lives here rather than in the cell: renderCell re-runs on every
+    // scroll and every sort, and state held inside a cell would not survive either.
+    const [edit, setEdit] = useState(null)          // { playerId, draft }
+    const [pendingId, setPendingId] = useState(null)
+    // Confirmed bids, keyed by player. The backend patches market.json after a confirmed
+    // bid, but this page will not refetch it until the next run changes the run id - so this
+    // is what shows a bid in the meantime.
+    const [bids, setBids] = useState({})
+    const [error, setError] = useState(null)
+    const [confirming, setConfirming] = useState(null)   // { playerId, price, usedSuggestion }
+
+    const closeEdit = () => setEdit(null)
+
+    // The suggestion is the honest yardstick for a typo: one digit too many is always a
+    // factor of ten, so twice the suggestion catches it on a cheap player as well as on
+    // an expensive one, which a fixed euro threshold does not.
+    const needsConfirmation = (row, price) => {
+        const reference = row.suggestedBid || row.marketValue
+        return Boolean(reference) && price >= 2 * reference
+    }
+
+    // Shown whenever the failure did not come from our own Flask API - a thrown fetch, or
+    // a non-OK response with no parseable JSON "error" (the dev-server proxy answers a
+    // plain-text 500 when Flask is not running at all, which is the common local setup)
+    const apiUnreachable = "Die Flask-API ist nicht erreichbar. Läuft app.py?"
+
+    const send = async (playerId, price) => {
+        setPendingId(playerId)
+        setConfirming(null)
+
+        try {
+            const response = await fetch(`/api/market/${playerId}/bid`, {
+                method: price === null ? "DELETE" : "POST",
+                headers: { "Content-Type": "application/json", ...bidTokenHeader() },
+                body: price === null ? undefined : JSON.stringify({ price })
+            })
+            const body = await response.json().catch(() => ({}))
+
+            if (!response.ok) {
+                // Our own endpoints always answer a failure as JSON carrying "error" - a
+                // finished German sentence, shown verbatim. Anything else (no body.error)
+                // did not come from Flask at all, so it gets the same message as a thrown
+                // fetch rather than a raw HTTP status nobody asked for.
+                setError(body.error || apiUnreachable)
+                return
+            }
+
+            // What Kickbase confirmed, not what was typed
+            setBids((current) => ({ ...current, [playerId]: body.ownBid }))
+            // Scoped to this row: a response for A must never discard a draft the user has
+            // since started on B. Without this check, a late A closing the shared `edit`
+            // state would silently wipe out whatever the user is now typing on B.
+            setEdit((current) => current?.playerId === playerId ? null : current)
+        } catch (e) {
+            // A network failure rather than an HTTP status: naming the cause beats
+            // "Gebot fehlgeschlagen", which would send you looking at Kickbase
+            setError(apiUnreachable)
+        } finally {
+            // Same scoping as above, so a late response for A cannot clear a pending
+            // indicator that by now belongs to a different row
+            setPendingId((current) => current === playerId ? null : current)
+        }
+    }
+
+    const submit = (row) => {
+        const price = Number(edit.draft)
+        if (!price)
+            return
+
+        if (needsConfirmation(row, price))
+            // Recorded here rather than re-derived in the dialog: by the time it renders,
+            // row.suggestedBid says nothing about which reference the check just used.
+            setConfirming({ playerId: row.playerId, price, usedSuggestion: Boolean(row.suggestedBid) })
+        else
+            send(row.playerId, price)
+    }
 
     // Who "you" are, so the user is left out of their own rival set and a suggested bid is
     // capped at their own budget. Null until a scrape has written the flag.
@@ -223,12 +314,20 @@ function MarketTable() {
                 // Who the bid has to beat, so the number reads as what it is instead of as
                 // a forecast. Kickbase never says who is bidding, so this is the set that
                 // could - not the set that does.
+                //
+                // Three reasons for an empty rival set, and they say different things. The
+                // third one used to be unreachable: balances.json was a compile-time import,
+                // so an absent one failed the build. It is fetched now, and a deployment whose
+                // balances stage has not run yet reaches exactly this line - which read
+                // rivals[0] unconditionally and took the whole tab down with it.
                 const others = solved.rivals.length - 1
                 const beats = solved.isPhantom
                     ? "Kein anderer Manager kann den Preis zahlen, der Preis selbst genügt."
-                    : `Übertrifft ${solved.rivals[0].username} `
-                        + `(max. ${currencyFormatter.format(solved.rivals[0].maxBid)})`
-                        + (others > 0 ? ` und ${others} weitere.` : ".")
+                    : solved.rivals.length === 0
+                        ? "Keine Budgetdaten, also ist das hier nur der Preis selbst."
+                        : `Übertrifft ${solved.rivals[0].username} `
+                            + `(max. ${currencyFormatter.format(solved.rivals[0].maxBid)})`
+                            + (others > 0 ? ` und ${others} weitere.` : ".")
 
                 const capped = solved.exceedsBudget
                     ? ` Nötig wären ${currencyFormatter.format(solved.required)} - `
@@ -303,27 +402,33 @@ function MarketTable() {
             headerAlign: "center",
             align: "right",
             cellClassName: "font-tabular-nums",
-            renderCell: (params) => {
-                if (params.value === null || params.value === undefined)
-                    return ""
+            renderCell: (params) => (
+                <BidCell
+                    row={params.row}
+                    growthDays={config.bepGrowthDays}
+                    targetDays={config.bepTargetDays}
+                    editing={edit?.playerId === params.row.playerId}
+                    draft={edit?.playerId === params.row.playerId ? edit.draft : ""}
+                    pending={pendingId === params.row.playerId}
+                    onEdit={() => {
+                        // One bid in flight at a time: starting a different edit while a
+                        // request is pending is what let a late response for row A land on
+                        // whatever row B had become in the meantime
+                        if (pendingId !== null)
+                            return
 
-                // How far the bid sits above (or below) the current market value
-                const marketValue = params.row.marketValue
-                const surcharge = marketValue
-                    ? percentFormatter.format(params.value / marketValue - 1)
-                    : null
-
-                return (
-                    <span>
-                        {currencyFormatter.format(Number(params.value))}
-                        {surcharge && (
-                            <Typography component="span" variant="body2" sx={{ opacity: 0.6, marginLeft: "6px" }}>
-                                ({surcharge})
-                            </Typography>
-                        )}
-                    </span>
-                )
-            }
+                        setEdit({
+                            playerId: params.row.playerId,
+                            // The running bid if there is one, else the suggestion, else empty
+                            draft: String(params.row.ownBid ?? params.row.suggestedBid ?? "")
+                        })
+                    }}
+                    onDraftChange={(draft) => setEdit((current) => ({ ...current, draft }))}
+                    onSubmit={() => submit(params.row)}
+                    onWithdraw={() => send(params.row.playerId, null)}
+                    onCancel={closeEdit}
+                />
+            )
         },
         ...changeColumns("today", "Heute", 110),
         ...changeColumns("yesterday", "Gestern", 110),
@@ -530,7 +635,9 @@ function MarketTable() {
     // Missing balances or profiles cost columns their meaning, not the table - and both of
     // those already say so themselves: ManagerStacks warns about absent budget data, and the
     // bidder column is left out entirely without profiles.
-    const gate = dataGate({ name: MARKET, status, error, missing: missing.includes(MARKET), reload })
+    const gate = dataGate({
+        name: MARKET, status, error: fetchError, missing: missing.includes(MARKET), reload
+    })
 
     if (gate)
         return gate
@@ -552,7 +659,7 @@ function MarketTable() {
         return {
             // The player, not their position in the file. Keyed by index, every sale
             // shifted the rows below it onto a different player, which took the selection
-            // and the row state with it.
+            // and the row state with it. Also what addresses the row for the bid endpoints.
             id: row.playerId ?? `row-${i}`,
             playerId: row.playerId,
             teamLogo: process.env.PUBLIC_URL + "/images/" + row.teamId + ".png",
@@ -567,10 +674,23 @@ function MarketTable() {
             // What the asking price adds on top of the current market value. Always 0 for
             // free agents, where Kickbase asks exactly the market value.
             markup: row.marketValue ? row.price / row.marketValue - 1 : null,
-            // Days for the market value to grow into the asking price at the pace of the
-            // last three days
+            // Nobody bids on their own listing. Read off the solver rather than computed
+            // again here - it already resolves the same question (via sellerId and the
+            // logged-in manager's own id in balances.json) for the "Mindestgebot" and
+            // "Verdeckte Bieter" columns, and a second computation is a second place to
+            // drift from the first. The backend no longer ships an "isOwnListing" field of
+            // its own for exactly that reason.
+            isOwnListing: solved.isOwnListing,
+            // The pace both break-even figures come from, averaged in the backend over
+            // BEP_GROWTH_DAYS
+            avgDailyGrowth: row.avgDailyGrowth,
+            // Days for the market value to grow into the asking price at that pace
             daysToBep: daysToBreakEven(row),
-            ownBid: row.ownBid,
+            // The bid that would break even after BEP_TARGET_DAYS days. Kept apart from
+            // ownBid so the column still sorts by the real bid.
+            suggestedBid: breakEvenBid(row, config.bepTargetDays),
+            // A bid confirmed this session overrides what market.json was built with
+            ownBid: row.playerId in bids ? bids[row.playerId] : row.ownBid,
             today: row.today,
             todayPercent: relativeChange(row.today, row.marketValue),
             yesterday: row.yesterday,
@@ -625,6 +745,26 @@ function MarketTable() {
                 getRowClassName={(params) => params.row.isFreeAgent ? "free-agent-row" : ""}
                 initialState={{ sorting: { sortModel: [{ field: "expiration", sort: "asc" }] } }}
             />
+
+            <Dialog open={Boolean(confirming)} onClose={() => setConfirming(null)}>
+                <DialogTitle>Gebot bestätigen</DialogTitle>
+                <DialogContent>
+                    <DialogContentText>
+                        {confirming && `Wirklich ${currencyFormatter.format(confirming.price)} bieten? `
+                            + `Das ist mindestens das Doppelte des ${confirming.usedSuggestion ? "Vorschlags" : "Marktwerts"}.`}
+                    </DialogContentText>
+                </DialogContent>
+                <DialogActions>
+                    <Button onClick={() => setConfirming(null)}>Abbrechen</Button>
+                    <Button onClick={() => send(confirming.playerId, confirming.price)} autoFocus>
+                        Gebot abgeben
+                    </Button>
+                </DialogActions>
+            </Dialog>
+
+            <Snackbar open={Boolean(error)} autoHideDuration={8000} onClose={() => setError(null)}>
+                <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>
+            </Snackbar>
         </Box>
         </>
     )

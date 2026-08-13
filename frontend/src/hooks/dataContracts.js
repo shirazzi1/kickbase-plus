@@ -37,7 +37,9 @@ export const DATA_CONTRACTS = {
     "revenue_sum.json": { shape: OBJECT, label: "Summe der Transfererlöse" },
     "team_values.json": { shape: OBJECT, label: "Teamwert" },
     // Keyed by manager id, under a "managers" property, plus a coverage header
-    "manager_profiles.json": { shape: OBJECT, label: "Manager-Dossier" }
+    "manager_profiles.json": { shape: OBJECT, label: "Manager-Dossier" },
+    // The break-even horizons a run was configured with
+    "config.json": { shape: OBJECT, label: "Konfiguration" }
 }
 
 /**

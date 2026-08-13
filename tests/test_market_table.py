@@ -52,6 +52,41 @@ def history(*values):
     return [{"dt": 20000 + i, "mv": mv} for i, mv in enumerate(values)]
 
 
+def set_bep_days(growth, target):
+    """Set or clear the two horizon variables."""
+    from os import environ
+    for name, value in (("BEP_GROWTH_DAYS", growth), ("BEP_TARGET_DAYS", target)):
+        if value is None:
+            environ.pop(name, None)
+        else:
+            environ[name] = value
+
+
+def run_main_config_write():
+    """Call the config writer with PUBLIC_DIR redirected, and return what it wrote."""
+    import json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = path.join(tmp, "data")
+        ts_dir = path.join(data_dir, "timestamps")
+        from os import makedirs
+        makedirs(ts_dir, exist_ok=True)
+
+        import main
+
+        original = (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR)
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
+        miscellaneous.TIMESTAMP_DIR = ts_dir
+        try:
+            main.write_bep_config()
+            with open(path.join(data_dir, "config.json")) as f:
+                return json.load(f)
+        finally:
+            miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR = original
+
+
 ### ===============================================================================
 ### market_value_deltas()
 ### ===============================================================================
@@ -159,6 +194,16 @@ USER_LISTED = {
     "u": {"i": OWN_USER_ID, "n": "shirazzi", "uim": "user/91fd.jpe", "isvf": False, "st": 0},
 }
 
+### Kai Havertz, listed by a different league member - neither Kickbase nor us.
+### Without this fixture, "sellerId" is only ever exercised against userId is None
+### (Kickbase) or userId == OWN_USER_ID (ours), so a bug that carried every league
+### member's listing as our own id would go unnoticed.
+OTHER_MANAGER_LISTED = {
+    "i": "223", "fn": "Kai", "n": "Havertz", "tid": "3", "pos": 3, "st": 0,
+    "mvt": 1, "mv": 41000000, "prc": 45000000, "ofc": 0,
+    "u": {"i": OTHER_USER_ID, "n": "Meier", "uim": "user/ab12.jpe", "isvf": False, "st": 0},
+}
+
 
 def test_own_bid_read_from_the_offers_list():
     player = Market_Players(OWN_BID_VIA_OFS)
@@ -244,7 +289,8 @@ def run_market():
     import main
     from backend.kickbase.v4 import leagues
 
-    market_items = [USER_LISTED, NO_BID, OWN_BID_VIA_OFS, OWN_BID_VIA_TOP_LEVEL, FOREIGN_BID]
+    market_items = [USER_LISTED, NO_BID, OWN_BID_VIA_OFS, OWN_BID_VIA_TOP_LEVEL, FOREIGN_BID,
+                    OTHER_MANAGER_LISTED]
 
     ### Only the injured player carries a note, and the API leaves the trailing newline in
     stats_by_id = {
@@ -269,7 +315,11 @@ def run_market():
         try:
             leagues.get_market = lambda token, lid: [Market_Players(p) for p in market_items]
             leagues.player_statistics = lambda token, lid, pid: stats_by_id.get(str(pid), {"i": str(pid), "st": 0})
-            leagues.player_marketvalue = lambda token, pid: history(1000, 1200, 1500, 1900)
+            ### 9 entries, uneven and partly falling before the last four settle into the
+            ### 1000/1200/1500/1900 run the delta tests below depend on. The extra length
+            ### lets a 7 day growth window (unlike the 3 day default) actually resolve.
+            leagues.player_marketvalue = lambda token, pid: history(
+                1400, 1300, 1500, 1250, 1600, 1000, 1200, 1500, 1900)
 
             class FakeLeague:
                 id = LEAGUE_ID
@@ -290,7 +340,7 @@ def run_market():
 
 def test_one_file_holds_both_listing_sources():
     rows = run_market()
-    assert len(rows) == 5, f"expected all 5 market players in one file, got {sorted(rows)}"
+    assert len(rows) == 6, f"expected all 6 market players in one file, got {sorted(rows)}"
     assert "Ginter" in rows, "the user listing is missing"
     assert "Gouweleeuw" in rows, "the Kickbase listing is missing"
 
@@ -340,7 +390,7 @@ def test_deltas_are_attached_to_every_row():
         assert row["today"] == 400, f"{name}: expected today 400, got {row['today']}"
         assert row["yesterday"] == 300, f"{name}: expected yesterday 300, got {row['yesterday']}"
         assert row["twoDays"] == 200, f"{name}: expected twoDays 200, got {row['twoDays']}"
-        assert row["sevenDaysAvg"] is None, f"{name}: 4 entries cannot span 7 days"
+        assert row["sevenDaysAvg"] == 600, f"{name}: expected sevenDaysAvg 600, got {row['sevenDaysAvg']}"
 
 
 def test_trend_is_gone():
@@ -411,6 +461,98 @@ def test_expiration_sorts_chronologically_as_a_string():
 
 
 ### ===============================================================================
+### The fields the bid field needs
+### ===============================================================================
+
+
+def test_every_row_carries_the_player_id():
+    """Without it a row cannot be addressed, so no bid can name a player."""
+    rows = run_market()
+    for name, row in rows.items():
+        assert row.get("playerId"), f"row without a playerId: {row}"
+    ### The ids are the "i" values from the market items
+    assert {row["playerId"] for row in rows.values()} >= {"8289", "3754", "49"}, \
+        f"expected the fixture player ids, got {[row['playerId'] for row in rows.values()]}"
+
+
+def test_seller_id_identifies_the_users_own_listing():
+    """You cannot bid on a player you listed yourself, so something has to say whose
+
+    listing it is. main.py no longer flags this itself ("isOwnListing" was a second,
+    independently computed answer to the same question the frontend's auction solver
+    already answers from "sellerId" plus the logged-in manager's own id in
+    balances.json) - it only ships the seller's id, and the comparison against the
+    logged-in manager happens once, in the frontend.
+    """
+    rows = run_market()
+    ### Ginter is listed by OWN_USER_ID in the fixtures
+    assert rows["Ginter"]["sellerId"] == OWN_USER_ID, \
+        f"expected Ginter's sellerId to be the user's own id, got {rows['Ginter']['sellerId']!r}"
+
+
+def test_foreign_and_kickbase_listings_carry_a_different_seller_id():
+    rows = run_market()
+    assert rows["Musah"]["sellerId"] is None, \
+        f"a Kickbase listing has no seller, got {rows['Musah']['sellerId']!r}"
+    ### Havertz is listed by a different league member - the case a check that only
+    ### looks at "sellerId is not None" would wrongly treat as ours
+    assert rows["Havertz"]["sellerId"] == OTHER_USER_ID, \
+        f"expected another manager's own id, got {rows['Havertz']['sellerId']!r}"
+    assert rows["Havertz"]["sellerId"] != OWN_USER_ID, \
+        "another manager's listing must not carry the user's own id"
+    for name, row in rows.items():
+        if row["isFreeAgent"]:
+            assert row["sellerId"] is None, \
+                f"a Kickbase listing has no seller to flag as the user's own: {name}"
+
+
+def test_rows_carry_the_averaged_growth():
+    rows = run_market()
+    for name, row in rows.items():
+        growth = row["avgDailyGrowth"]
+        assert growth is None or isinstance(growth, (int, float)), \
+            f"expected a number or None for {name}, got {growth!r}"
+
+
+def test_the_growth_matches_the_three_day_deltas_at_the_default():
+    """The same telescoping identity, now through market() itself."""
+    set_bep_days(None, None)
+    rows = run_market()
+    for name, row in rows.items():
+        if row["avgDailyGrowth"] is None:
+            continue
+        deltas = (row["today"], row["yesterday"], row["twoDays"])
+        if any(delta is None for delta in deltas):
+            continue
+        expected = sum(deltas) / 3
+        assert row["avgDailyGrowth"] == expected, \
+            f"{name}: expected {expected}, got {row['avgDailyGrowth']}"
+
+
+def test_a_wider_window_changes_the_growth():
+    """Proves the env variable actually reaches market(), not just get_bep_days()."""
+    set_bep_days("3", "3")
+    narrow = {name: row["avgDailyGrowth"] for name, row in run_market().items()}
+    set_bep_days("7", "3")
+    wide = {name: row["avgDailyGrowth"] for name, row in run_market().items()}
+    set_bep_days(None, None)
+
+    differing = [name for name in narrow
+                 if narrow[name] is not None and wide.get(name) is not None
+                 and narrow[name] != wide[name]]
+    assert differing, \
+        f"expected at least one player's growth to change with the window, got {narrow} vs {wide}"
+
+
+def test_config_json_is_written_with_both_horizons():
+    set_bep_days("7", "14")
+    config = run_main_config_write()
+    set_bep_days(None, None)
+    assert config == {"bepGrowthDays": 7, "bepTargetDays": 14}, \
+        f"expected both horizons in config.json, got {config}"
+
+
+### ===============================================================================
 
 if __name__ == "__main__":
     print("market_value_deltas()")
@@ -450,6 +592,15 @@ if __name__ == "__main__":
     check("listedSince survives for a user listing", test_listed_since_survives_for_a_user_listing)
     check("a listing without a date stays None", test_a_listing_without_a_date_stays_none)
     check("the offer count survives", test_offer_count_survives)
+
+    print("\nthe fields the bid field needs")
+    check("every row carries the player id", test_every_row_carries_the_player_id)
+    check("seller id identifies the user's own listing", test_seller_id_identifies_the_users_own_listing)
+    check("foreign and Kickbase listings carry a different seller id", test_foreign_and_kickbase_listings_carry_a_different_seller_id)
+    check("rows carry the averaged growth", test_rows_carry_the_averaged_growth)
+    check("the growth matches the three day deltas at the default", test_the_growth_matches_the_three_day_deltas_at_the_default)
+    check("a wider window changes the growth", test_a_wider_window_changes_the_growth)
+    check("config.json is written with both horizons", test_config_json_is_written_with_both_horizons)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")

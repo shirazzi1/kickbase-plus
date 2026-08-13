@@ -43,7 +43,11 @@ import TabFreshness from "./components/TabFreshness"
 // is why a fresh checkout could not build and why a finished run needed a recompile to show
 // up. They now arrive as one document from /api/data/timestamps, polled on a timer - and a run
 // id this page has not seen makes every table refetch itself. See hooks/useJsonData.js.
-import { DataRefreshContext, useTimestampIndex } from "./hooks/useJsonData"
+import { DataRefreshContext, useJsonData, useTimestampIndex } from "./hooks/useJsonData"
+
+// The break-even horizons a run was configured with, named in the market table's help text.
+// A dataset like any other since PR #10 wrote it, so it is fetched like any other.
+import { BEP_DEFAULTS, CONFIG_DATASET } from "./components/marketFormulas"
 
 import { datasetStatus, runStatus, runSummary, statusColour, statusLabel } from "./components/freshness"
 
@@ -130,6 +134,11 @@ function App() {
   const timestamps = refresh.timestamps
   const run_manifest = refresh.manifest
   const timestamp_main = timestamps.main ?? {}
+
+  // The break-even horizons named in the market table's help text. Falls back to the
+  // backend's own defaults while the file is in flight, so the sentence never reads
+  // "der letzten undefined Tage".
+  const config = { ...BEP_DEFAULTS, ...(useJsonData(CONFIG_DATASET).data ?? {}) }
 
   // Handlers
   const handleCloseDisclaimer = () => setDisclaimerVisible(false);
@@ -226,10 +235,9 @@ function App() {
 
           <TabPanel sx={{ padding: 0 }} value="1">
             <TabShell name="transfers" timestamps={timestamps} manifest={run_manifest}>
-            
               {/* "Transfers" related components */}
               <Paper sx={{ marginTop: "25px" }} elevation={5}>
-                <Typography variant="h4" sx={{ padding: "15px" }}>Transfermarkt <HelpIcon text="Alle Spieler auf dem Transfermarkt. Hellblau hinterlegte Zeilen sind Free Agents, also direkt von Kickbase gelistet; alle anderen sind von Nutzern aus der Liga gelistet. 'Dein Gebot' zeigt dein laufendes Gebot und den Aufschlag auf den aktuellen Marktwert. Ein Ablaufdatum liefert Kickbase nur für die eigenen Angebote. 'Tage bis BEP' sind die Tage, die der Marktwert beim Zuwachs der letzten drei Tage braucht, um den Preis einzuholen; ein Strich heißt, dass der Marktwert gerade nicht steigt. Neben jeder Euro-Spalte steht derselbe Zuwachs relativ zum aktuellen Marktwert. 'Verdeckte Bieter', 'Mindestgebot' und 'Zwangsverkauf droht' rechnen mit den geschätzten Budgets aus den Balances - Kickbase verrät weder Kontostände noch wer bietet, also sind das Schätzungen; die Spaltenköpfe sagen jeweils, welche. Die Bieter-Übersicht über der Tabelle zeigt alle Manager nach geschätztem Maximalgebot. 'Wahrscheinliche Mitbieter' schneidet diese Budgets mit dem bisherigen Kaufverhalten aus dem Manager-Dossier: Manager, die den Preis zahlen könnten und die öfter bei diesem Klub oder überwiegend in steigende Marktwerte kaufen. Die Spalte erscheint erst, wenn ein Scrape-Lauf die Manager-Profile geschrieben hat."/></Typography>
+                <Typography variant="h4" sx={{ padding: "15px" }}>Transfermarkt <HelpIcon text={`Alle Spieler auf dem Transfermarkt. Hellblau hinterlegte Zeilen sind Free Agents, also direkt von Kickbase gelistet; alle anderen sind von Nutzern aus der Liga gelistet. 'Dein Gebot' zeigt dein laufendes Gebot und den Aufschlag auf den aktuellen Marktwert; ist keines abgegeben, steht dort grau das Gebot, das beim durchschnittlichen Zuwachs der letzten ${config.bepGrowthDays} Tage in ${config.bepTargetDays} Tagen Break-Even erreicht. Ein Klick macht das Feld editierbar und gibt das Gebot direkt bei Kickbase ab. Ein Ablaufdatum liefert Kickbase nur für die eigenen Angebote. 'Tage bis BEP' sind die Tage, die der Marktwert beim Zuwachs der letzten ${config.bepGrowthDays} Tage braucht, um den Preis einzuholen; ein Strich heißt, dass der Marktwert gerade nicht steigt. Neben jeder Euro-Spalte steht derselbe Zuwachs relativ zum aktuellen Marktwert. 'Verdeckte Bieter', 'Mindestgebot' und 'Zwangsverkauf droht' rechnen mit den geschätzten Budgets aus den Balances - Kickbase verrät weder Kontostände noch wer bietet, also sind das Schätzungen; die Spaltenköpfe sagen jeweils, welche. Die Bieter-Übersicht über der Tabelle zeigt alle Manager nach geschätztem Maximalgebot. 'Wahrscheinliche Mitbieter' schneidet diese Budgets mit dem bisherigen Kaufverhalten aus dem Manager-Dossier: Manager, die den Preis zahlen könnten und die öfter bei diesem Klub oder überwiegend in steigende Marktwerte kaufen. Die Spalte erscheint erst, wenn ein Scrape-Lauf die Manager-Profile geschrieben hat.`}/></Typography>
                 <MarketTable />
               </Paper>
               <Paper sx={{ marginTop: "25px" }} elevation={5}>

@@ -233,6 +233,35 @@ describe("useTimestampIndex", () => {
         expect(read("generation")).toBe("1")
     })
 
+    it("bumps the generation when the first run of all finishes", async () => {
+        // A fresh volume: the index is empty, so the first answer carries no run at all. That
+        // used to be indistinguishable from "nothing seen yet", so the first finished run was
+        // recorded without ever bumping the generation - the freshness chips went green and
+        // the tables stayed empty until someone reloaded the page.
+        mockDataServer({ timestamps: {} })
+
+        const refresh = await showIndex()
+
+        expect(read("generation")).toBe("0")
+
+        mockDataServer({ timestamps: currentTimestamps(["market"], "RUN-1") })
+
+        await act(async () => { refresh().reload() })
+
+        expect(read("generation")).toBe("1")
+        expect(read("run")).toBe("RUN-1")
+    })
+
+    it("does not bump on a second empty answer", async () => {
+        // The other half of the same fix: an empty index polled twice is still no change
+        mockDataServer({ timestamps: {} })
+
+        const refresh = await showIndex()
+        await act(async () => { refresh().reload() })
+
+        expect(read("generation")).toBe("0")
+    })
+
     it("leaves the generation alone when the run is the same", async () => {
         mockDataServer({ timestamps: currentTimestamps(["market"], "RUN-1") })
 

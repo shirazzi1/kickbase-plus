@@ -16,17 +16,30 @@
  *
  * @param {object} datasets file name to payload, e.g. { "market.json": [] }
  * @param {object} timestamps the /api/data/timestamps response
+ * @param {Array} failing dataset names whose fetch should answer 500
+ * @param {function} handler consulted first, for the routes this server knows nothing about.
+ *   Returns a promise to use as the answer, or undefined to fall through. The bid endpoints
+ *   are the reason it exists: their suite needs a table with rows in it *and* a `fetch` that
+ *   fails in a particular way on `/api/market/...`, which one blanket mock cannot do since
+ *   the table started fetching its own rows.
  * @returns {object} the installed jest.fn, so a test can assert on the requests
  */
-export function mockDataServer({ datasets = {}, timestamps = {}, failing = [] } = {}) {
+export function mockDataServer({ datasets = {}, timestamps = {}, failing = [], handler } = {}) {
     const respond = (body, status = 200) => Promise.resolve({
         ok: status >= 200 && status < 300,
         status,
         json: () => Promise.resolve(body)
     })
 
-    const fetchMock = jest.fn((url) => {
+    const fetchMock = jest.fn((url, options) => {
         const path = String(url)
+
+        if (handler) {
+            const custom = handler(path, options)
+
+            if (custom !== undefined)
+                return custom
+        }
 
         if (path.endsWith("/api/data/timestamps"))
             return respond(timestamps)

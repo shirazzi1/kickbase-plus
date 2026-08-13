@@ -17,6 +17,7 @@ This is a hobby project to test stuff with JSON and the cores of Python. Feel fr
 
 ##### Table of Contents
 - [Screenshots](#screenshots)
+- [Transfermarkt](#transfermarkt)
 - [Docker](#docker)
   - [Persistent data](#persistent-data)
   - [docker run](#docker-run)
@@ -40,6 +41,30 @@ As of v1.4.0
 ![Revenue](repo_pictures/revenue.png)  
 ![LivePoints](repo_pictures/livepoints.png)  
 
+## Transfermarkt
+The "Dein Gebot" column shows, greyed out, the bid that would break even after
+`BEP_TARGET_DAYS` days at the average daily market value growth of the last
+`BEP_GROWTH_DAYS` days. Clicking the cell makes it editable: the checkmark places the bid
+with Kickbase, the X withdraws a bid that is already standing. A dash means the market
+value is currently flat or falling, or that the history is too short — the cell can still
+be clicked to bid anyway.
+
+This is the one feature that writes to Kickbase, so it needs the Flask API (`app.py`)
+running alongside the frontend. Without it the cell reports that the API is unreachable;
+everything else in the table keeps working.
+
+The bid field also needs `BID_TOKEN` set. Both write endpoints require it on an
+`X-Bid-Token` header; the frontend dev server adds that header itself (from its own
+`BID_TOKEN` environment variable, via `frontend/src/setupProxy.js`) and it is never sent
+to the browser. Because of that, **port 3000 must not be exposed publicly** — anything
+that can reach the dev server can bid through its proxy exactly as the frontend does.
+`BID_TOKEN` is required for the whole container to start, not only for this field — see
+the Docker section below for why.
+
+The bid field only works against the frontend dev server (`npm start`), which is what
+the Docker container runs. A static `npm run build` bundle ships neither the proxy nor
+the token, so the bid field cannot function there; that build target is left as-is.
+
 ## Docker
 If you want to run this in a Docker container, you'll first need to set some mandatory environment variables:  
 
@@ -55,6 +80,7 @@ If you want to run this in a Docker container, you'll first need to set some man
 | `START_MONEY` | No | The amount of money you started with. If not set, defaults to 50.000.000€ |
 | `TZ` | No | The timezone to use. Defaults to `Europe/Berlin` |
 | `FLASK_PORT` | No | The port the dashboard and the API are served on. Defaults to `5000`. |
+| `BID_TOKEN` | No | An extra shared secret accepted by the two Flask endpoints that place and withdraw a market bid (see [Transfermarkt](#transfermarkt)). **No longer required:** the server generates a token per start and hands it to the browser itself. Set it only if a script or a dev proxy has to bid without loading the page. |
 
 > [!IMPORTANT]
 > The format of `START_DATE` changed: the old `dd.mm.yyyy` format is no longer accepted and now causes a hard error on startup.
@@ -64,6 +90,13 @@ If you want to run this in a Docker container, you'll first need to set some man
 > **One port now.** The container used to publish 3000 (a create-react-app dev server) and 5000
 > (the API). Flask serves both the dashboard and the API from **5000**, or from `FLASK_PORT` if
 > you set it. A `-p 3000:3000` from an older setup has nothing behind it any more.
+
+> [!IMPORTANT]
+> **`BID_TOKEN` is no longer required.** It was, briefly: the bid field's token could only reach
+> Flask through the dev server's proxy, so an operator had to supply one. There is no dev server
+> in the container any more, so the server generates a token per start and hands it to the browser
+> with the page. A `BID_TOKEN` you already set keeps working and is still accepted - you can also
+> drop it. See [Transfermarkt](#transfermarkt) for what the token does and does not protect.
 
 > [!IMPORTANT]
 > The Live tab shows the last live-points snapshot that was taken, not a live one: no scheduled
@@ -141,10 +174,13 @@ docker run -d \
     -e KB_PASSWORD=<kickbase_password> \
     -e DISCORD_WEBHOOK=<discord_webhook> \
     -e START_DATE=<start_timestamp> \
+    -e BID_TOKEN=<bid_token> \
     -v <your_folder>/kickbase-data:/code/data \
     ghcr.io/casudo/kickbase-insights:latest
 ```  
 `<start_timestamp>` is an ISO 8601 timestamp in UTC, e.g. `2026-08-01T18:00:00Z`.  
+`<bid_token>` is any long random string of your choosing; the container exits on startup without it.  
+The backend port `5000` is configurable via the `FLASK_PORT` environment variable (e.g. `-e FLASK_PORT=<flask_port>`) and defaults to `5000` if unset. On macOS, the AirPlay Receiver occupies port `5000` by default, which stops Flask from binding to it - set `FLASK_PORT` to something else in that case.  
 
 ### Docker Compose
 ```yaml
@@ -162,12 +198,14 @@ services:
       - KB_PASSWORD=<kickbase_password>
       - DISCORD_WEBHOOK=<discord_webhook>
       - START_DATE=<start_timestamp> # ISO 8601 in UTC, e.g. 2026-08-01T18:00:00Z
+      - BID_TOKEN=<bid_token> # any long random string; container exits on startup without it
     volumes:
       # The append-only history, the last-good snapshots and the two request caches.
       # Without this they are deleted on every image pull, and the history cannot be
       # fetched again.
       - <your_folder>/kickbase-data:/code/data
 ```  
+The backend port `5000` above is configurable via the `FLASK_PORT` environment variable and defaults to `5000` if unset. On macOS, the AirPlay Receiver occupies port `5000` by default, which stops Flask from binding to it - set `FLASK_PORT` to something else in that case.  
 
 ### Health check
 The container reports its own state, so `docker ps` shows `healthy` or `unhealthy` instead
@@ -272,6 +310,10 @@ cd frontend && npm run build     # writes frontend/build
 ./venv/bin/python -m flask run --port=5000
 ```
 
+On macOS the AirPlay Receiver occupies port `5000` by default, which stops Flask from binding to
+it. Set `FLASK_PORT` to something else in that case - `frontend/src/setupProxy.js` reads the same
+variable, so the dev server follows along.
+
 **Tests.** Python is plain scripts, no framework:
 
 ```bash
@@ -283,6 +325,7 @@ and the frontend uses Jest through react-scripts:
 ```bash
 cd frontend && CI=true npx react-scripts test
 ```
+
 
 ---
 

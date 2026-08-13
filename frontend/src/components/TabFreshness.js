@@ -13,8 +13,9 @@
 import Chip from "@mui/material/Chip"
 import Stack from "@mui/material/Stack"
 import Tooltip from "@mui/material/Tooltip"
+import Typography from "@mui/material/Typography"
 
-import { CURRENT, datasetStatus, statusColour, statusLabel } from "./freshness"
+import { CURRENT, UNKNOWN, datasetStatus, statusColour, statusLabel } from "./freshness"
 
 // freshness.js keys its stage table by the timestamp file name; the timestamp index keys by the
 // dataset. Both spellings meet here.
@@ -42,6 +43,16 @@ function TabFreshness({ datasets = [], timestamps = {}, manifest = null }) {
 
     if (worth.length === 0)
         return null
+
+    // Before the first run there is no manifest and no timestamp, so every dataset in every
+    // tab is UNKNOWN - a row of grey chips saying the same thing on a page whose tables are
+    // all already showing their own "noch keine Daten". One sentence instead.
+    if (worth.every((entry) => entry.status === UNKNOWN))
+        return (
+            <Typography variant="caption" sx={{ display: "block", padding: "0 15px 10px", opacity: 0.6 }}>
+                Noch kein abgeschlossener Lauf – das Alter dieser Daten lässt sich nicht beurteilen.
+            </Typography>
+        )
 
     return (
         <Stack direction="row" spacing={1} sx={{ padding: "0 15px 10px", flexWrap: "wrap" }} useFlexGap>

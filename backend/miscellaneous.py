@@ -45,6 +45,16 @@ PLAYER_IMAGE_BASE_URL = "https://kickbase.b-cdn.net/"
 LOGIN_BONUS_STEP = 10_000
 LOGIN_BONUS_CAP = 100_000
 
+### The break-even horizons, and their defaults. Both defaults reproduce the numbers the
+### frontend produced when it averaged today, yesterday and vorgestern itself: the daily
+### deltas telescope, so their mean over three days is exactly the three-day average.
+DEFAULT_BEP_GROWTH_DAYS = 3
+DEFAULT_BEP_TARGET_DAYS = 3
+
+### The market value history covers 365 days, so a window of 365 can never be filled -
+### it needs days + 1 entries to measure a difference across.
+MAX_BEP_GROWTH_DAYS = 364
+
 ### Achievement rewards, from help.kickbase.com/help/erfolge.
 ###
 ### Not in here on purpose: the league size achievements (600 Kreisliga, 601 Regionalliga,
@@ -333,6 +343,34 @@ def market_value_deltas(market_value_history: list) -> dict:
     }
 
 
+def average_daily_growth(market_value_history: list, days: int):
+    """### The mean daily market value change over the last `days` days.
+
+    Measured as one difference across the window rather than as a mean of daily deltas,
+    which is the same number - the deltas telescope - and needs one subtraction instead
+    of `days` of them.
+
+    A history too short for the window has no answer rather than an answer of zero. A
+    player added to the competition last week has no 30 day pace, and calling it zero
+    would rank them alongside a genuinely stagnant one.
+
+    Args:
+        market_value_history (list): A player_marketvalue response, oldest first, each
+            entry with "mv".
+        days (int): The window to average over. Needs days + 1 entries to measure across.
+
+    Returns:
+        float: The mean daily change, negative for a falling market value. None if the
+            history does not cover the window.
+    """
+    history = market_value_history or []
+
+    if len(history) < days + 1:
+        return None
+
+    return (history[-1]["mv"] - history[-1 - days]["mv"]) / days
+
+
 ### How far back a market value history has to reach: the /marketValue/{days} window every
 ### request asks for. One value for every player and every run, and the only one this
 ### project has ever seen the API answer with data.
@@ -395,6 +433,60 @@ def get_start_datetime() -> datetime:
         )
 
     return parsed.astimezone(timezone.utc)
+
+
+def get_bep_days() -> tuple:
+    """### Read the two break-even horizons from the environment.
+
+    They answer different questions and are therefore separate variables:
+
+      - BEP_GROWTH_DAYS is how far back the daily market value growth is averaged.
+      - BEP_TARGET_DAYS is how far ahead a suggested bid has to break even.
+
+    A 14 day payback judged on three days of momentum is a different statement from one
+    judged on fourteen, and both are legitimate - so neither is derived from the other.
+
+    Raises:
+        exceptions.KickbaseException: If either value is not a positive integer, or if
+            BEP_GROWTH_DAYS exceeds what the market value history can cover.
+
+    Returns:
+        tuple: (growth_days, target_days), both int.
+    """
+    def positive_int(name: str, default: int) -> int:
+        raw = getenv(name)
+
+        ### Unset means "use the default". Set-but-empty is a mistake, not an unset
+        ### value, so it falls through to int() below and is rejected there.
+        if raw is None:
+            return default
+
+        try:
+            value = int(raw)
+        except ValueError:
+            raise exceptions.KickbaseException(
+                f"{name} '{raw}' is not a whole number of days. Use e.g. {name}=7."
+            )
+
+        if value < 1:
+            raise exceptions.KickbaseException(
+                f"{name} is {value}, but a horizon has to be at least one day."
+            )
+
+        return value
+
+    growth_days = positive_int("BEP_GROWTH_DAYS", DEFAULT_BEP_GROWTH_DAYS)
+    target_days = positive_int("BEP_TARGET_DAYS", DEFAULT_BEP_TARGET_DAYS)
+
+    ### A window wider than the history is not a smaller answer, it is no answer: every
+    ### player would show a dash in both break-even columns, with nothing saying why.
+    if growth_days > MAX_BEP_GROWTH_DAYS:
+        raise exceptions.KickbaseException(
+            f"BEP_GROWTH_DAYS is {growth_days}, but the market value history covers 365 "
+            f"days, so at most {MAX_BEP_GROWTH_DAYS} can be averaged over."
+        )
+
+    return growth_days, target_days
 
 
 def parse_feed_timestamp(timestamp: str) -> datetime:
@@ -1346,6 +1438,64 @@ def read_last_good(file_name: str):
     except (OSError, json.JSONDecodeError) as e:
         logging.warning(f"Could not read the last good {file_name}: {e}")
         return None
+
+
+def patch_market_bid(player_id: str, own_bid) -> bool:
+    """### Write a confirmed bid into the market.json row it belongs to.
+
+    The frontend imports market.json at build time, so a bid placed through the API is
+    invisible until the next scrape. Patching the row bridges that gap, and survives a
+    page reload the way a value held only in React state would not.
+
+    This can still race a main.py run writing the same file. write_json_to_file()'s
+    replace is atomic, so a reader never sees a half-written market.json any more - but
+    that only protects one write against itself. This function's own read of the file and
+    its own write still happen without a lock around the pair, so a concurrent run's
+    write can land between the two and be silently overwritten by this one, or the other
+    way round. The next scrape repairs the row either way, so the race is accepted rather
+    than solved here.
+
+    Args:
+        player_id (str): The player whose row is patched.
+        own_bid: The confirmed bid, or None when it was withdrawn.
+
+    Returns:
+        bool: True when a row matched and the file was rewritten.
+
+    Raises:
+        Exception: Whatever write_json_to_file() raises when a matching row is found -
+            it no longer swallows a write failure (see its docstring). The caller must
+            not treat "a row matched" as "the file was rewritten" without catching this;
+            app.py's callers do, by wrapping this call and answering the same
+            "could not confirm" outcome a failed read-back gets, since a bid confirmed by
+            Kickbase and then unrecorded locally is that same shape of problem.
+    """
+    market_path = path.join(PUBLIC_DIR, "market.json")
+
+    if not path.exists(market_path):
+        logging.warning(f"{market_path} does not exist yet, so no bid was patched into it.")
+        return False
+
+    try:
+        with open(market_path, "r") as f:
+            rows = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        ### OSError covers a permissions problem or a stale mount on open(), not just a
+        ### missing file (path.exists() above already ruled that out). Either way the
+        ### bid was already placed and read back by the caller, so this is a stale file,
+        ### not a failed bid - it must answer like every other "nothing matched" branch
+        ### here, not escape as an uncaught exception.
+        logging.warning(f"Could not read {market_path}, so no bid was patched into it: {e}")
+        return False
+
+    for row in rows:
+        if str(row.get("playerId")) == str(player_id):
+            row["ownBid"] = own_bid
+            write_json_to_file(rows, "market.json")
+            return True
+
+    logging.warning(f"No market.json row for player {player_id}, so no bid was patched in.")
+    return False
 
 
 def julian_to_date(julian_date: int) -> str:

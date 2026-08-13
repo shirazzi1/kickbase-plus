@@ -705,21 +705,11 @@ def test_the_child_is_the_one_process_the_container_serves_from():
 
 def test_the_flask_port_is_configurable():
     """The healthcheck in the Dockerfile reads the same variable, so the two cannot disagree
-    about which port to ask."""
+    about which port to ask. check_environment() reads it; build_children() takes it."""
     import entrypoint
 
-    from os import environ
-
-    original = environ.get("FLASK_PORT")
-    environ["FLASK_PORT"] = "8080"
-
-    try:
-        assert "--port=8080" in entrypoint.build_children()[0].command
-    finally:
-        if original is None:
-            del environ["FLASK_PORT"]
-        else:
-            environ["FLASK_PORT"] = original
+    assert "--port=8080" in entrypoint.build_children("8080")[0].command
+    assert f"--port={entrypoint.DEFAULT_FLASK_PORT}" in entrypoint.build_children()[0].command
 
 
 def test_nothing_in_the_entrypoint_runs_npm():

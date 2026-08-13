@@ -237,6 +237,56 @@ def post_json(url: str, payload: dict, token: str = None, timeout=DEFAULT_TIMEOU
                     extra_headers=extra_headers, retry=True)
 
 
+def request(method: str, url: str, payload: dict = None, token: str = None,
+            timeout=DEFAULT_TIMEOUT, extra_headers: dict = None, retry: bool = True):
+    """### Send one request and return the raw response, without raising on its status.
+
+    get_json()/post_json() raise before the body is ever read, which is right for every
+    call that treats an error status as failure - but wrong for a caller that needs the
+    body of an error response, because it carries the actual reason. The market offer
+    writes are exactly that caller: a rejected bid answers with a status *and* a JSON
+    body naming why, and _raise_for_status() would throw the body away before
+    leagues.py ever saw it. This function stops one step earlier and hands back
+    whatever came over the wire, whatever its status code.
+
+    Args:
+        method (str): "GET", "POST" or "DELETE".
+        url (str): The URL to call.
+        payload (dict): The JSON body, for POST.
+        token (str): The user's kkstrauth token.
+        timeout: Connect and read timeout, as requests takes it.
+        extra_headers (dict): Additional headers.
+        retry (bool): False to use the non-retrying session - e.g. for a write whose
+            failure can be data, not an outage: Kickbase reports a rejected bid as a
+            5xx (see leagues.OFFER_ERRORS), and DELETE is in RETRY_METHODS, so retrying
+            would turn a semantic rejection into a false "Kickbase is down" after three
+            attempts.
+
+    Raises:
+        exceptions.ApiUnreachableException: No answer at all (timeout, DNS, connection
+            refused). There is no body to recover in that case either way.
+
+    Returns:
+        requests.Response: The raw response.
+    """
+    headers = kickbase_headers(token, extra_headers)
+
+    try:
+        if method == "POST":
+            return session(retry).post(url, json=payload, headers=headers, timeout=timeout)
+        if method == "DELETE":
+            return session(retry).delete(url, headers=headers, timeout=timeout)
+        return session(retry).get(url, headers=headers, timeout=timeout)
+    except requests.exceptions.Timeout as e:
+        raise exceptions.ApiUnreachableException(
+            f"{method} {url} timed out after {timeout}.", url=url) from e
+    except requests.exceptions.RequestException as e:
+        ### Covers connection errors, DNS failures and a retry budget spent on
+        ### connection level errors rather than on statuses
+        raise exceptions.ApiUnreachableException(
+            f"{method} {url} could not be reached: {e}", url=url) from e
+
+
 def _request(method: str, url: str, payload: dict = None, token: str = None,
              timeout=DEFAULT_TIMEOUT, extra_headers: dict = None, retry: bool = True):
     """### Send one request and turn whatever comes back into JSON or a typed exception.
@@ -253,21 +303,8 @@ def _request(method: str, url: str, payload: dict = None, token: str = None,
     Returns:
         The decoded JSON body.
     """
-    headers = kickbase_headers(token, extra_headers)
-
-    try:
-        if method == "POST":
-            response = session(retry).post(url, json=payload, headers=headers, timeout=timeout)
-        else:
-            response = session(retry).get(url, headers=headers, timeout=timeout)
-    except requests.exceptions.Timeout as e:
-        raise exceptions.ApiUnreachableException(
-            f"{method} {url} timed out after {timeout}.", url=url) from e
-    except requests.exceptions.RequestException as e:
-        ### Covers connection errors, DNS failures and a retry budget spent on
-        ### connection level errors rather than on statuses
-        raise exceptions.ApiUnreachableException(
-            f"{method} {url} could not be reached: {e}", url=url) from e
+    response = request(method, url, payload=payload, token=token, timeout=timeout,
+                       extra_headers=extra_headers, retry=retry)
 
     _raise_for_status(method, url, response, KICKBASE_AUTH_MESSAGE, was_retried(method, retry))
 

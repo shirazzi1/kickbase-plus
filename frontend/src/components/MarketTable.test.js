@@ -40,6 +40,11 @@ const MARKET = [
     }
 ]
 
+// The break-even horizons. A fetched dataset like the rest since this phase, so it is served
+// rather than mocked into the module registry - and for the same reason the others are: this
+// suite runs against fixed fixtures, not against whatever main.py last wrote into a checkout.
+const CONFIG = { bepGrowthDays: 3, bepTargetDays: 3 }
+
 // Three managers: one rich rival, the user, and a seller deep in the red. Both listings are
 // priced at 10.000.000, so Anna can pay and the seller's own money is irrelevant.
 const BALANCES = [
@@ -85,7 +90,7 @@ const rowOf = (name) => screen.getByText(name).closest("[role='row']")
 // case below is about what the table does then.
 beforeEach(() => {
     mockDataServer({
-        datasets: { "market.json": MARKET, "balances.json": BALANCES },
+        datasets: { "market.json": MARKET, "balances.json": BALANCES, "config.json": CONFIG },
         timestamps: currentTimestamps(["market", "balances"])
     })
 })

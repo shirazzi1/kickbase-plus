@@ -43,6 +43,9 @@ PUBLIC_DATASETS = frozenset({
     ### Written by app.py's /api/livepoints rather than by a scheduled run, so it is
     ### frequently absent. The Live tab renders that as an empty state.
     "live_points.json",
+    ### The break-even horizons a run was configured with (BEP_GROWTH_DAYS/BEP_TARGET_DAYS),
+    ### named in the market table's columns and help text.
+    "config.json",
 })
 
 ### The datasets no browser ever sees.
