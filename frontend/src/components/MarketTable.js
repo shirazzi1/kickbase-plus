@@ -119,7 +119,9 @@ function MarketTable() {
             return
 
         if (needsConfirmation(row, price))
-            setConfirming({ playerId: row.playerId, price })
+            // Recorded here rather than re-derived in the dialog: by the time it renders,
+            // row.suggestedBid says nothing about which reference the check just used.
+            setConfirming({ playerId: row.playerId, price, usedSuggestion: Boolean(row.suggestedBid) })
         else
             send(row.playerId, price)
     }
@@ -374,7 +376,7 @@ function MarketTable() {
                 <DialogContent>
                     <DialogContentText>
                         {confirming && `Wirklich ${currencyFormatter.format(confirming.price)} bieten? `
-                            + "Das ist mindestens das Doppelte des Vorschlags."}
+                            + `Das ist mindestens das Doppelte des ${confirming.usedSuggestion ? "Vorschlags" : "Marktwerts"}.`}
                     </DialogContentText>
                 </DialogContent>
                 <DialogActions>
