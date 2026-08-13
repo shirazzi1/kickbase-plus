@@ -401,6 +401,142 @@ def test_the_prefetch_still_fetches_what_the_disk_cannot_answer():
 
 
 ### ===============================================================================
+### A cache that never works has to be visible in the log
+### ===============================================================================
+
+
+class CapturedLog:
+    """Collects the records the code under test logs."""
+
+    def __init__(self):
+        self.records = []
+
+    def handle(self, record):
+        self.records.append(record)
+
+    def messages(self, level=None):
+        return [r.getMessage() for r in self.records
+                if level is None or r.levelno >= level]
+
+    def __enter__(self):
+        import logging
+
+        self.handler = logging.Handler()
+        self.handler.emit = self.handle
+        logging.getLogger().addHandler(self.handler)
+        self.previous = logging.getLogger().level
+        logging.getLogger().setLevel(logging.DEBUG)
+
+        return self
+
+    def __exit__(self, *exc):
+        import logging
+
+        logging.getLogger().removeHandler(self.handler)
+        logging.getLogger().setLevel(self.previous)
+
+
+def prefetch_log(api, player_ids):
+    """Run a prefetch and return what it logged."""
+    def run():
+        leagues.get_market("token", "1")
+        leagues.prefetch_players("token", "1", player_ids)
+
+    with CapturedLog() as log:
+        run_with(api, run)
+
+    return log
+
+
+def test_the_hit_count_is_logged_even_when_it_is_zero():
+    """Every reason to skip an entry is a DEBUG line, so a cache that never works is silent
+    in the INFO log - indistinguishable from one that is working."""
+    import logging
+
+    api = FakeApi()
+    log = prefetch_log(api, ["755", "756"])
+
+    assert any("0 of 2 market value curve(s) came from the disk cache" in m
+               for m in log.messages(logging.INFO)), \
+        f"expected the miss to be reported, got {log.messages(logging.INFO)}"
+
+
+def test_the_hit_count_is_logged_when_the_cache_answers():
+    import logging
+
+    api = FakeApi()
+    run_with(api, lambda: a_run(api, ["755", "756"]))
+    leagues.clear_caches()
+
+    log = prefetch_log(api, ["755", "756"])
+
+    assert any("2 of 2 market value curve(s) came from the disk cache" in m
+               for m in log.messages(logging.INFO)), \
+        f"expected the hits to be reported, got {log.messages(logging.INFO)}"
+
+
+def test_an_empty_cache_directory_is_called_out():
+    """Zero hits with entries on disk is the daily miss. Zero hits with nothing on disk is a
+    cache that is not being written - the case the count exists to separate."""
+    import logging
+
+    api = FakeApi()
+    log = prefetch_log(api, ["755"])
+
+    assert any("Nothing is cached" in m for m in log.messages(logging.WARNING)), \
+        f"expected a warning about the empty cache, got {log.messages(logging.WARNING)}"
+
+
+def test_a_missing_marker_is_named_as_the_reason():
+    import logging
+
+    api = FakeApi(mvud=None)
+    log = prefetch_log(api, ["755"])
+
+    assert any("no market value update marker" in m for m in log.messages(logging.WARNING)), \
+        f"expected the missing marker to be named, got {log.messages(logging.WARNING)}"
+
+
+def test_an_empty_history_is_named_as_the_reason():
+    """What /marketValue/<days> answering with an empty "it" list looks like from here."""
+    import logging
+
+    class NoPoints(FakeApi):
+        def get(self, url, headers=None, timeout=None):
+            if "/marketValue/" in url:
+                self.urls.append(url)
+                return FakeResponse({"it": []})
+            return super().get(url, headers=headers, timeout=timeout)
+
+    api = NoPoints()
+    log = prefetch_log(api, ["755"])
+
+    assert any("empty history" in m for m in log.messages(logging.WARNING)), \
+        f"expected the empty history to be named, got {log.messages(logging.WARNING)}"
+
+
+def test_the_daily_miss_does_not_warn():
+    """Entries on disk plus zero hits is the expected once-a-day refetch, not a fault."""
+    import logging
+
+    api = FakeApi()
+    run_with(api, lambda: a_run(api, ["755"]))
+    leagues.clear_caches()
+
+    api.mvud = NEXT_MVUD
+    log = prefetch_log(api, ["755"])
+
+    assert not any("Nothing is cached" in m for m in log.messages(logging.WARNING)), \
+        f"the daily refetch must not warn, got {log.messages(logging.WARNING)}"
+    assert any("1 entry stored" in m for m in log.messages(logging.INFO)), \
+        f"expected the stored count to be reported, got {log.messages(logging.INFO)}"
+
+
+def test_entries_on_disk_counts_nothing_when_there_is_no_directory():
+    assert market_value_cache.entries_on_disk() == 0, "expected zero for a missing directory"
+
+
+### ===============================================================================
 ### The deltas the frontend reads must not change because of the cache
 ### ===============================================================================
 
@@ -473,6 +609,18 @@ if __name__ == "__main__":
           test_the_prefetch_skips_the_players_the_disk_can_answer)
     check("the prefetch still fetches what the disk cannot answer",
           test_the_prefetch_still_fetches_what_the_disk_cannot_answer)
+
+    print("\na cache that never works has to be visible")
+    check("the hit count is logged even when it is zero",
+          test_the_hit_count_is_logged_even_when_it_is_zero)
+    check("the hit count is logged when the cache answers",
+          test_the_hit_count_is_logged_when_the_cache_answers)
+    check("an empty cache directory is called out", test_an_empty_cache_directory_is_called_out)
+    check("a missing marker is named as the reason", test_a_missing_marker_is_named_as_the_reason)
+    check("an empty history is named as the reason", test_an_empty_history_is_named_as_the_reason)
+    check("the daily miss does not warn", test_the_daily_miss_does_not_warn)
+    check("entries_on_disk() counts nothing when there is no directory",
+          test_entries_on_disk_counts_nothing_when_there_is_no_directory)
 
     print("\nthe deltas the frontend reads")
     check("the deltas are the same from the cache as from the API",

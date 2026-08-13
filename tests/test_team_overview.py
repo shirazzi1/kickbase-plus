@@ -335,6 +335,65 @@ def test_a_team_that_answers_500_does_not_cost_the_others():
     assert len(teams) == len(REAL_TEAMS) - 1, f"expected 17 teams, got {len(teams)}"
 
 
+def test_a_rate_limit_is_not_read_as_an_unusable_schedule():
+    """Walking into 97 probes during a live rate limit spends the rest of the budget and then
+    blames a competition with no teams in it."""
+    from backend import exceptions
+
+    class RateLimited(FakeApi):
+        def get(self, url, headers=None, timeout=None):
+            self.urls.append(url)
+            if url.endswith("/matchdays"):
+                return FakeResponse({}, status_code=429)
+            return super().get(url, headers=headers, timeout=timeout)
+
+    api = RateLimited()
+
+    try:
+        with_api(api, lambda: competitions.get_team_overview("token"))
+    except exceptions.RateLimitedException:
+        pass
+    except Exception as e:
+        raise AssertionError(f"expected RateLimitedException, got {type(e).__name__}: {e}")
+    else:
+        raise AssertionError("expected RateLimitedException")
+
+    assert api.probed_team_ids == [], \
+        f"the probe ran into the rate limit: {len(api.probed_team_ids)} team requests"
+
+
+def test_an_expired_token_is_not_read_as_an_unusable_schedule():
+    from backend import exceptions
+
+    class TokenGone(FakeApi):
+        def get(self, url, headers=None, timeout=None):
+            self.urls.append(url)
+            return FakeResponse({}, status_code=401)
+
+    api = TokenGone()
+
+    try:
+        with_api(api, lambda: competitions.get_team_overview("token"))
+    except exceptions.AuthExpiredException:
+        pass
+    except Exception as e:
+        raise AssertionError(f"expected AuthExpiredException, got {type(e).__name__}: {e}")
+    else:
+        raise AssertionError("expected AuthExpiredException")
+
+    assert api.probed_team_ids == [], \
+        f"the probe ran on with a dead token: {len(api.probed_team_ids)} team requests"
+
+
+def test_a_server_error_on_the_schedule_still_falls_back_to_the_probe():
+    """The shortcut is optional; a broken matchday endpoint must not cost the team overview."""
+    api = FakeApi(matchdays=None)  ### answers 500
+
+    teams = with_api(api, lambda: competitions.get_team_overview("token"))
+
+    assert len(teams) == len(REAL_TEAMS), f"expected the probe to find every team, got {len(teams)}"
+
+
 def test_a_competition_with_no_teams_at_all_fails_loudly():
     """Writing an empty STATIC_teams.json would blank four later stages instead."""
     from backend import exceptions
@@ -388,6 +447,12 @@ if __name__ == "__main__":
     print("\nwhat must not happen")
     check("a team that answers 500 does not cost the others",
           test_a_team_that_answers_500_does_not_cost_the_others)
+    check("a rate limit is not read as an unusable schedule",
+          test_a_rate_limit_is_not_read_as_an_unusable_schedule)
+    check("an expired token is not read as an unusable schedule",
+          test_an_expired_token_is_not_read_as_an_unusable_schedule)
+    check("a server error on the schedule still falls back to the probe",
+          test_a_server_error_on_the_schedule_still_falls_back_to_the_probe)
     check("a competition with no teams at all fails loudly",
           test_a_competition_with_no_teams_at_all_fails_loudly)
 

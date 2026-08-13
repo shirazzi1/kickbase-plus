@@ -314,6 +314,24 @@ def write(player_id: str, days: int, history: list) -> None:
                         f"carrying on: {type(e).__name__}: {e}")
 
 
+def entries_on_disk() -> int:
+    """### How many curves are cached at all, whether or not they are still current.
+
+    Read for one reason: telling "the market values moved, so everything was refetched"
+    apart from "nothing is being cached at all". The first is what this module does once a
+    day; the second is a broken cache, and without this number the two look identical in the
+    log - both are simply zero cache hits. See prefetch_players().
+
+    Returns:
+        int: The number of entries, 0 if the directory does not exist or cannot be listed.
+    """
+    try:
+        return sum(1 for name in os.listdir(MARKET_VALUE_CACHE_DIR)
+                   if name.endswith(".json"))
+    except OSError:
+        return 0
+
+
 def julian_today() -> int:
     """### Today as the API dates its curve points: days since 1970-01-01, in UTC.
 

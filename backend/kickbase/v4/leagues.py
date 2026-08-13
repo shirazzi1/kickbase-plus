@@ -135,18 +135,15 @@ def prefetch_players(token: str, league_id: str, player_ids) -> None:
     ### The curves that are still current on disk are read here rather than in the pool
     ### below, so the thread pool is only spun up for the ones that really need a request
     ### and the log line says how many that is
+    wanted_curves = len(missing_marketvalues)
     from_disk = _fill_from_disk(missing_marketvalues)
     missing_marketvalues = [p for p in missing_marketvalues if p not in from_disk]
 
-    if not missing_statistics and not missing_marketvalues:
-        if from_disk:
-            logging.info(f"All {len(from_disk)} market value curve(s) were still current in "
-                         f"the disk cache.")
-        return
+    if wanted_curves:
+        _report_disk_cache(len(from_disk), wanted_curves)
 
-    if from_disk:
-        logging.info(f"{len(from_disk)} market value curve(s) came from the disk cache, "
-                     f"{len(missing_marketvalues)} have to be fetched.")
+    if not missing_statistics and not missing_marketvalues:
+        return
 
     logging.debug(f"Prefetching {len(missing_statistics)} player statistic(s) "
                   f"and {len(missing_marketvalues)} market value history/histories...")
@@ -160,6 +157,44 @@ def prefetch_players(token: str, league_id: str, player_ids) -> None:
         ### Surface any exception rather than letting it disappear into the pool
         for future in futures:
             future.result()
+
+
+def _report_disk_cache(served: int, wanted: int) -> None:
+    """### Say what the market value disk cache did, including when it did nothing.
+
+    Unconditional on purpose. Every single reason an entry is not used is a DEBUG line per
+    player, so a cache that never works at all shows up in the INFO log as exactly nothing -
+    the same silence as a cache that is working perfectly and simply had its daily miss.
+    This line is the difference, and the count of entries on disk is what makes it readable
+    without turning DEBUG on:
+
+      - Zero hits, entries on disk: the market values moved. Expected once a day.
+      - Zero hits, no entries at all: nothing is being written. Either no run ever got a
+        market value update marker, or the curves that come back are empty - which is what
+        an empty "it" list does, and it costs the frontend its deltas either way.
+
+    Args:
+        served (int): How many curves came from the disk.
+        wanted (int): How many were needed.
+    """
+    stored = market_value_cache.entries_on_disk()
+
+    logging.info(f"{served} of {wanted} market value curve(s) came from the disk cache "
+                 f"({stored} entr{'y' if stored == 1 else 'ies'} stored, "
+                 f"{wanted - served} to fetch).")
+
+    if served or stored:
+        return
+
+    if market_value_cache.current_mvud() is None:
+        logging.warning("Nothing is cached and this run has no market value update marker, "
+                        "so every curve is fetched fresh. The market response carried no "
+                        "'mvud' - see get_market().")
+    else:
+        logging.warning("Nothing is cached even though this run has a market value update "
+                        "marker. A curve is only stored when it holds at least one point, so "
+                        "check whether the API is answering with an empty history - that "
+                        "leaves the value deltas empty too, cache or no cache.")
 
 
 def _fill_from_disk(player_ids: list) -> set:

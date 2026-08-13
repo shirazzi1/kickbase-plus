@@ -230,14 +230,29 @@ def team_ids_from_matchdays(token: str, competition_id: int = 1) -> list:
         token (str): The user's kkstrauth token.
         competition_id (int): The competition ID (default: 1 which is the Bundesliga).
 
+    Raises:
+        exceptions.AuthExpiredException: The token was rejected.
+        exceptions.RateLimitedException: The account is being throttled.
+
     Returns:
         list: The team ids as the API spells them, in ascending numeric order. Empty if the
             response does not carry them.
     """
+    ### A shortcut that cannot be taken is not worth failing a run over, so a matchday
+    ### response this cannot use means "probe the ids instead".
+    ###
+    ### An expired token and a rate limit are not that, and they are named individually
+    ### rather than caught as the KickbaseException base class they share with the four
+    ### below. Both say something about every further request, not about this one: walking
+    ### into 97 probes with retry=False during a live rate limit spends the remaining budget
+    ### and then reports "couldn't find a single team", which is a lie about what happened.
+    ### Same argument fetch_team() makes about the 401 it lets past.
+    unusable = (exceptions.ApiRequestException, exceptions.ApiResponseException,
+                exceptions.ApiUnavailableException, exceptions.ApiUnreachableException)
+
     try:
         response = _matchdays_response(token, competition_id)
-    except exceptions.KickbaseException as e:
-        ### A shortcut is not worth failing a run over. The probe below does not need this.
+    except unusable as e:
         logging.warning(f"Could not read the matchdays to find the team ids ({e}). Falling "
                         "back to probing them.")
         return []
