@@ -274,7 +274,7 @@ def run_main(stage_results):
 
     original = (main.DATA_DIR, main.LOG_DIR, main.TIMESTAMP_DIR,
                 miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-                miscellaneous.LAST_GOOD_DIR,
+                miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
                 main.login, main.build_stages, leagues.clear_caches)
 
     main.DATA_DIR = data_dir
@@ -283,6 +283,7 @@ def run_main(stage_results):
     miscellaneous.DATA_DIR = data_dir
     miscellaneous.TIMESTAMP_DIR = ts_dir
     miscellaneous.LAST_GOOD_DIR = path.join(tmp.name, "last-good")
+    miscellaneous.HISTORY_DIR = path.join(tmp.name, "history")
 
     try:
         main.login = lambda: (object(), "token", "1")
@@ -293,7 +294,7 @@ def run_main(stage_results):
     finally:
         (main.DATA_DIR, main.LOG_DIR, main.TIMESTAMP_DIR,
          miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-         miscellaneous.LAST_GOOD_DIR,
+         miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
          main.login, main.build_stages, leagues.clear_caches) = original
 
 
@@ -451,7 +452,7 @@ def run_once_with(login_failure):
 
     original = (main.LOG_DIR, main.TIMESTAMP_DIR, main.DATA_DIR,
                 miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-                miscellaneous.LAST_GOOD_DIR,
+                miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
                 main.login, leagues.clear_caches)
 
     main.LOG_DIR = path.join(tmp.name, "logs")
@@ -460,6 +461,7 @@ def run_once_with(login_failure):
     miscellaneous.DATA_DIR = data_dir
     miscellaneous.TIMESTAMP_DIR = ts_dir
     miscellaneous.LAST_GOOD_DIR = path.join(tmp.name, "last-good")
+    miscellaneous.HISTORY_DIR = path.join(tmp.name, "history")
 
     try:
         from os import environ
@@ -482,7 +484,7 @@ def run_once_with(login_failure):
     finally:
         (main.LOG_DIR, main.TIMESTAMP_DIR, main.DATA_DIR,
          miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-         miscellaneous.LAST_GOOD_DIR,
+         miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
          main.login, leagues.clear_caches) = original
         tmp.cleanup()
         runs.end_run()

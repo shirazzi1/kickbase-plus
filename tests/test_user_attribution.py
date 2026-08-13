@@ -176,12 +176,13 @@ def run_taken_free_players(transfers, league_users=LEAGUE_USERS, owner_id="25927
             json.dump(teams, f)
 
         original = (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-                    miscellaneous.LAST_GOOD_DIR,
+                    miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
                     leagues.transfers, leagues.player_statistics, leagues.player_marketvalue)
         main.DATA_DIR = data_dir
         miscellaneous.DATA_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
+        miscellaneous.HISTORY_DIR = path.join(tmp, "history")
 
         try:
             leagues.transfers = lambda token, lid: transfers
@@ -199,7 +200,7 @@ def run_taken_free_players(transfers, league_users=LEAGUE_USERS, owner_id="25927
                 return json.load(f)
         finally:
             (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-             miscellaneous.LAST_GOOD_DIR,
+             miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
              leagues.transfers, leagues.player_statistics,
              leagues.player_marketvalue) = original
 
