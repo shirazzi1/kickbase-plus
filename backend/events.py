@@ -56,7 +56,7 @@ from datetime import datetime, timedelta, timezone
 from os import getenv, makedirs, path
 
 from backend import miscellaneous
-from backend.paths import DATA_DIR, EVENTS_STATE_PATH
+from backend.paths import STATE_DIR, EVENTS_STATE_PATH
 
 ### ===============================================================================
 
@@ -1049,7 +1049,7 @@ def _read_transfers():
             empty list: an empty list says nobody bought anything, and the difference decides
             whether a cash_hortung event may be claimed at all.
     """
-    file_path = path.join(DATA_DIR, miscellaneous.ALL_TRANSFERS_FILE)
+    file_path = path.join(STATE_DIR, miscellaneous.ALL_TRANSFERS_FILE)
 
     try:
         with open(file_path, "r") as f:

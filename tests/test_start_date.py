@@ -182,12 +182,15 @@ def test_turnovers_cleans_pre_cutoff_events_from_the_cache():
         ts_dir = path.join(data_dir, "timestamps")
 
         ### Point every writer at the temporary directory
-        original = (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        original = (main.PUBLIC_DIR, main.STATE_DIR,
+                    miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
                     miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
                     leagues.transfers, leagues.player_statistics,
                     leagues.player_marketvalue, miscellaneous.calculate_revenue_data_daily)
-        main.DATA_DIR = data_dir
-        miscellaneous.DATA_DIR = data_dir
+        main.PUBLIC_DIR = data_dir
+        main.STATE_DIR = data_dir
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
         miscellaneous.HISTORY_DIR = path.join(tmp, "history")
@@ -222,7 +225,8 @@ def test_turnovers_cleans_pre_cutoff_events_from_the_cache():
             with open(path.join(data_dir, "all_transfers.json")) as f:
                 cache = json.load(f)
         finally:
-            (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+            (main.PUBLIC_DIR, main.STATE_DIR,
+             miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR, miscellaneous.TIMESTAMP_DIR,
              miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
              leagues.transfers, leagues.player_statistics,
              leagues.player_marketvalue, miscellaneous.calculate_revenue_data_daily) = original
@@ -250,9 +254,11 @@ def test_revenue_graph_accepts_an_iso_start_date():
         with open(path.join(data_dir, "STATIC_users.json"), "w") as f:
             json.dump({"u1": "UserA"}, f)
 
-        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        original = (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+                    miscellaneous.TIMESTAMP_DIR,
                     miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR)
-        miscellaneous.DATA_DIR = data_dir
+        miscellaneous.PUBLIC_DIR = data_dir
+        miscellaneous.STATE_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
         miscellaneous.HISTORY_DIR = path.join(tmp, "history")
@@ -268,7 +274,8 @@ def test_revenue_graph_accepts_an_iso_start_date():
             with open(path.join(data_dir, "revenue_sum.json")) as f:
                 result = json.load(f)
         finally:
-            (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+            (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+             miscellaneous.TIMESTAMP_DIR,
              miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR) = original
 
     assert "UserA" in result, f"expected a series for UserA, got {result}"

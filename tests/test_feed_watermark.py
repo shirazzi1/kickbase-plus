@@ -35,9 +35,11 @@ def check(name, fn):
     environ["START_DATE"] = START
 
     with tempfile.TemporaryDirectory() as tmp:
-        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        original = (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+                    miscellaneous.TIMESTAMP_DIR,
                     miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR)
-        miscellaneous.DATA_DIR = tmp
+        miscellaneous.PUBLIC_DIR = tmp
+        miscellaneous.STATE_DIR = tmp
         miscellaneous.TIMESTAMP_DIR = path.join(tmp, "timestamps")
         miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
         miscellaneous.HISTORY_DIR = path.join(tmp, "history")
@@ -55,7 +57,8 @@ def check(name, fn):
             print(f"  ok    {name}")
             PASSED.append(True)
         finally:
-            (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+            (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+             miscellaneous.TIMESTAMP_DIR,
              miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR) = original
             leagues.clear_caches()
             http.reset_session()
@@ -125,8 +128,8 @@ def with_feed(items, fn):
 
 def record(items):
     """Write all_transfers.json as turnovers() would have, oldest first."""
-    makedirs(miscellaneous.DATA_DIR, exist_ok=True)
-    with open(path.join(miscellaneous.DATA_DIR, miscellaneous.ALL_TRANSFERS_FILE), "w") as f:
+    makedirs(miscellaneous.STATE_DIR, exist_ok=True)
+    with open(path.join(miscellaneous.STATE_DIR, miscellaneous.ALL_TRANSFERS_FILE), "w") as f:
         json.dump(items, f)
 
 
@@ -157,8 +160,8 @@ def test_a_missing_all_transfers_file_is_a_full_walk():
 
 
 def test_an_unreadable_all_transfers_file_is_a_full_walk():
-    makedirs(miscellaneous.DATA_DIR, exist_ok=True)
-    with open(path.join(miscellaneous.DATA_DIR, miscellaneous.ALL_TRANSFERS_FILE), "w") as f:
+    makedirs(miscellaneous.STATE_DIR, exist_ok=True)
+    with open(path.join(miscellaneous.STATE_DIR, miscellaneous.ALL_TRANSFERS_FILE), "w") as f:
         f.write("{ not json")
 
     items = [transfer(n) for n in range(10)]
@@ -338,8 +341,8 @@ def test_load_known_transfers_reads_what_turnovers_wrote():
 
 
 def test_load_known_transfers_shrugs_off_a_file_that_is_not_a_list():
-    makedirs(miscellaneous.DATA_DIR, exist_ok=True)
-    with open(path.join(miscellaneous.DATA_DIR, miscellaneous.ALL_TRANSFERS_FILE), "w") as f:
+    makedirs(miscellaneous.STATE_DIR, exist_ok=True)
+    with open(path.join(miscellaneous.STATE_DIR, miscellaneous.ALL_TRANSFERS_FILE), "w") as f:
         json.dump({"transfers": []}, f)
 
     assert miscellaneous.load_known_transfers() == [], "expected an empty list"

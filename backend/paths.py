@@ -14,29 +14,45 @@ from os import path, getcwd
 BASE_PATH = getcwd()
 ### Paths for logs and data files
 LOG_DIR = path.join(BASE_PATH, "logs")
-DATA_DIR = path.join(BASE_PATH, "frontend", "src", "data")
-TIMESTAMP_DIR = path.join(DATA_DIR, "timestamps")
+
+### Where the datasets the browser reads are written.
+###
+### These used to live in frontend/src/data, which meant the React build imported them at
+### compile time and only a create-react-app dev server recompiling in production could
+### ever show fresh numbers. app.py serves this directory read-only under /api/data/<name>
+### instead, so a write here reaches the browser on its next fetch and nothing is rebuilt.
+###
+### Under "data" with everything else that outlives a container: not because these files
+### cannot be fetched again - the next run rewrites all of them - but because a mount that
+### covers data/ then also covers the moment between "the image was pulled" and "the first
+### run finished", where the alternative is an empty dashboard.
+PUBLIC_DIR = path.join(BASE_PATH, "data", "public")
+TIMESTAMP_DIR = path.join(PUBLIC_DIR, "timestamps")
+
+### Where the datasets only the backend reads are written. See backend/datasets.py for
+### which those are and why each one is in this list.
+###
+### They were in frontend/src/data too, where nothing imported them and writing them still
+### triggered a webpack rebuild. Keeping them out of PUBLIC_DIR is also what makes the
+### /api/data allowlist trustworthy: a file that is not in the served directory cannot be
+### served by mistake. all_transfers.json in particular is a season of the activity feed.
+STATE_DIR = path.join(BASE_PATH, "data", "state")
+
+### Where both of the above used to live. Read only by the one-time migration at startup
+### (see backend/state_migration.py); nothing else may reach for it.
+LEGACY_DATA_DIR = path.join(BASE_PATH, "frontend", "src", "data")
 
 ### Where the previous good copy of each data file is kept, so a run that succeeds but
 ### writes rubbish can still be compared against what stood there before.
-###
-### Deliberately outside DATA_DIR. Everything under frontend/src is watched by the
-### create-react-app dev server that serves this project in production, so a second file
-### next to every dataset would double the rebuilds without a single component importing
-### it. Nothing in the frontend reads these.
 LAST_GOOD_DIR = path.join(BASE_PATH, "data", "last-good")
 
 ### Where the append-only history of the datasets accumulates: one NDJSON line per run,
 ### one file per dataset per day.
 ###
-### Outside DATA_DIR for the same reason LAST_GOOD_DIR is, only more so. Everything under
-### frontend/src is watched by the create-react-app dev server that serves this project in
-### production, and this store gains a line six times a day and never shrinks - watching it
-### would mean a rebuild per append over a file that grows all season. Nothing in the
-### frontend reads these; they are the raw material for diffing snapshots against each
-### other.
+### Nothing in the frontend reads these; they are the raw material for diffing snapshots
+### against each other, they gain a line six times a day and they never shrink.
 ###
-### Shares the "data" parent with LAST_GOOD_DIR on purpose, so a single volume mount of
+### Shares the "data" parent with everything else on purpose, so a single volume mount of
 ### /code/data makes everything that has to survive an image pull survive it.
 HISTORY_DIR = path.join(BASE_PATH, "data", "history")
 

@@ -41,7 +41,7 @@ from os import path
 sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
 
 from backend import miscellaneous
-from backend.paths import DATA_DIR
+from backend.paths import PUBLIC_DIR, STATE_DIR
 from main import max_bid
 
 ### ===============================================================================
@@ -309,9 +309,9 @@ def main():
     with_bonuses = "--no-bonuses" not in sys.argv
     flat_team_value = "--flat-team-value" in sys.argv
 
-    balances_path = path.join(DATA_DIR, "balances.json")
-    transfers_path = path.join(DATA_DIR, "all_transfers.json")
-    users_path = path.join(DATA_DIR, "STATIC_users.json")
+    balances_path = path.join(PUBLIC_DIR, "balances.json")
+    transfers_path = path.join(STATE_DIR, "all_transfers.json")
+    users_path = path.join(STATE_DIR, "STATIC_users.json")
 
     missing = [p for p in (balances_path, transfers_path, users_path) if not path.exists(p)]
 

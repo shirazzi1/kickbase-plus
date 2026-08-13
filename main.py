@@ -8,9 +8,9 @@ from sys import stdout
 from logging.config import dictConfig
 from datetime import datetime, timedelta, timezone
 
-from backend import events, exceptions, miscellaneous, profiles, runs
+from backend import events, exceptions, miscellaneous, profiles, runs, state_migration
 from backend.kickbase.v4 import competitions, user, leagues
-from backend.paths import LOG_DIR, DATA_DIR, TIMESTAMP_DIR
+from backend.paths import LOG_DIR, PUBLIC_DIR, STATE_DIR, TIMESTAMP_DIR
 
 ### -------------------------------------------------------------------
 ### -------------------------------------------------------------------
@@ -157,6 +157,14 @@ def main(manifest: runs.RunManifest = None) -> runs.RunManifest:
 
     ### Configure logging with the settings from the dictionary
     dictConfig(build_logging_config(LOG_DIR))
+
+    ### Move what an older version of this container wrote into frontend/src/data over to
+    ### data/public and data/state. Once per deployment: after the first run there is
+    ### nothing left in the old directory and this is a listing that finds nothing.
+    ###
+    ### Before the login rather than as a stage. Five stages open files it moves, so a
+    ### migration that ran halfway through would have them reading an empty directory.
+    state_migration.migrate_legacy_layout()
 
     if manifest is None:
         manifest = runs.RunManifest(runs.start_run())
@@ -469,7 +477,7 @@ def taken_free_players(user_token: str, selected_league: object):
     free_players = []
 
     ### Get all users in the league
-    with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
+    with open(path.join(STATE_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
 
     ### Get all transfers in the league
@@ -508,7 +516,7 @@ def taken_free_players(user_token: str, selected_league: object):
             buy_prices[user_id].append((player_id, buy_price))
 
     ### Cycle through all teams
-    with open(path.join(DATA_DIR, "STATIC_teams.json"), "r") as f:
+    with open(path.join(STATE_DIR, "STATIC_teams.json"), "r") as f:
         all_teams = json.load(f)
     for team in all_teams:
         ### Cycle through all players of the team
@@ -656,7 +664,7 @@ def turnovers(user_token: str, selected_league: object) -> None:
 
     ### The feed names managers, it does not identify them. Everything downstream keys on
     ### the ID that this index resolves the name to.
-    with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
+    with open(path.join(STATE_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
     name_to_id = miscellaneous.build_user_name_index(league_users)
 
@@ -819,7 +827,7 @@ def team_value_per_match_day(user_token: str, selected_league: object) -> None:
     ### Get all match days of the season
     current_match_day, match_days_list = competitions.match_days(user_token)
 
-    with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
+    with open(path.join(STATE_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
 
     ### One request per match day, not one per manager and match day. A ranking response
@@ -869,7 +877,7 @@ def league_user_stats_tables(user_token: str, selected_league: object) -> None:
     final_user_stats = []
 
     ### Loop through all users in the league
-    with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
+    with open(path.join(STATE_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
 
     ### Normally a no-op, since balances() runs first and fills the cache
@@ -1043,7 +1051,7 @@ def balances(user_token: str, selected_league: object, own_user_id: str) -> None
     all_transfers = miscellaneous.drop_reverted_transfers(all_transfers)
 
     ### Read the league members
-    with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
+    with open(path.join(STATE_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
 
     ### The feed names managers by display name only, so every attribution below goes
@@ -1058,7 +1066,7 @@ def balances(user_token: str, selected_league: object, own_user_id: str) -> None
     ### without this an achievement would vanish again once the condition stops holding -
     ### a team value can fall back below the threshold. The file also carries the date the
     ### running balance needs, since the real one cannot be derived.
-    achievements_path = path.join(DATA_DIR, "achievements.json")
+    achievements_path = path.join(STATE_DIR, "achievements.json")
     earned_per_user = {}
 
     if path.exists(achievements_path):
@@ -1071,7 +1079,7 @@ def balances(user_token: str, selected_league: object, own_user_id: str) -> None
     ### Turnovers per manager, for the lucky touch family. turnovers() runs after this
     ### function, so the file is one run behind - an achievement shows up a run late.
     turnovers_by_user = {}
-    turnovers_path = path.join(DATA_DIR, "turnovers.json")
+    turnovers_path = path.join(PUBLIC_DIR, "turnovers.json")
 
     if path.exists(turnovers_path):
         try:

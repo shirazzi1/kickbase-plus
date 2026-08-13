@@ -33,10 +33,12 @@ PASSED = []
 def check(name, fn):
     ### Writes go to a temporary directory, never the real data directory
     with tempfile.TemporaryDirectory() as tmp:
-        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+        original = (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+                    miscellaneous.TIMESTAMP_DIR,
                     miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
                     competitions.TEAM_CACHE_DIR)
-        miscellaneous.DATA_DIR = tmp
+        miscellaneous.PUBLIC_DIR = tmp
+        miscellaneous.STATE_DIR = tmp
         miscellaneous.TIMESTAMP_DIR = path.join(tmp, "timestamps")
         ### Every write snapshots the file it replaces; without this the snapshots land
         ### in the repository's own data directory
@@ -57,7 +59,8 @@ def check(name, fn):
             print(f"  ok    {name}")
             PASSED.append(True)
         finally:
-            (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+            (miscellaneous.PUBLIC_DIR, miscellaneous.STATE_DIR,
+             miscellaneous.TIMESTAMP_DIR,
              miscellaneous.LAST_GOOD_DIR, miscellaneous.HISTORY_DIR,
              competitions.TEAM_CACHE_DIR) = original
             competitions.clear_caches()
@@ -412,7 +415,7 @@ def test_a_competition_with_no_teams_at_all_fails_loudly():
     else:
         raise AssertionError("expected a KickbaseException")
 
-    assert not path.exists(path.join(miscellaneous.DATA_DIR, "STATIC_teams.json")), \
+    assert not path.exists(path.join(miscellaneous.STATE_DIR, "STATIC_teams.json")), \
         "an empty team overview must not be written"
 
 

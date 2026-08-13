@@ -44,9 +44,9 @@ from os import getenv, path
 from statistics import mean, median
 from zoneinfo import ZoneInfo
 
-from backend import exceptions, miscellaneous
+from backend import datasets, exceptions, miscellaneous
 from backend.kickbase.v4 import leagues
-from backend.paths import DATA_DIR
+from backend.paths import PUBLIC_DIR, STATE_DIR
 
 ### ===============================================================================
 
@@ -538,7 +538,9 @@ def _load_json(file_name: str, written_by: str):
     """### Read one of the run's data files.
 
     Args:
-        file_name (str): The file in DATA_DIR to read.
+        file_name (str): The dataset to read. Which directory it lives in follows from the
+            registry - this stage reads both kinds: turnovers.json is served to the browser,
+            the other three are backend-private.
         written_by (str): The stage that produces it, named in the error so a failure
             points at the stage that actually went wrong.
 
@@ -548,7 +550,8 @@ def _load_json(file_name: str, written_by: str):
     Raises:
         exceptions.KickbaseException: If the file is missing or does not parse.
     """
-    file_path = path.join(DATA_DIR, file_name)
+    directory = STATE_DIR if datasets.dataset_kind(file_name) == datasets.STATE else PUBLIC_DIR
+    file_path = path.join(directory, file_name)
 
     try:
         with open(file_path, "r") as f:

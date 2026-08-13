@@ -18,9 +18,9 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta, timezone
 from os import getenv, path, makedirs
 from zoneinfo import ZoneInfo
-from backend.paths import DATA_DIR, HISTORY_DIR, LAST_GOOD_DIR, TIMESTAMP_DIR
+from backend.paths import PUBLIC_DIR, HISTORY_DIR, LAST_GOOD_DIR, STATE_DIR, TIMESTAMP_DIR
 
-from backend import exceptions
+from backend import datasets, exceptions
 from backend.kickbase import http
 
 ### ===============================================================================
@@ -203,7 +203,7 @@ def calculate_revenue_data_daily(turnovers: dict) -> None:
     logging.info("Calculating daily revenue data...")
 
     ### Load STATIC_users.json
-    with open(path.join(DATA_DIR, "STATIC_users.json"), "r") as f:
+    with open(path.join(STATE_DIR, "STATIC_users.json"), "r") as f:
         league_users = json.load(f)
 
     ### Create an empty dict with all user IDs as keys. The chart legend needs the names,
@@ -444,7 +444,7 @@ def load_known_transfers() -> list:
     Returns:
         list: The recorded activity feed items, oldest first as they were written.
     """
-    file_path = path.join(DATA_DIR, ALL_TRANSFERS_FILE)
+    file_path = path.join(STATE_DIR, ALL_TRANSFERS_FILE)
 
     if not path.exists(file_path):
         logging.debug(f"{file_path} does not exist yet, so there is no transfer history to "
@@ -936,7 +936,7 @@ def season_is_over(now: datetime) -> bool:
     Returns:
         bool: True once the last match of the season is over.
     """
-    match_days_path = path.join(DATA_DIR, "match_days.json")
+    match_days_path = path.join(PUBLIC_DIR, "match_days.json")
 
     if not path.exists(match_days_path):
         return False
@@ -1197,11 +1197,19 @@ def write_json_to_file(data, file_name: str) -> None:
             the stage that was writing has to fail, rather than carry on over a file that
             was never written.
     """
-    ### Check if it is a data or timestamp file
-    if file_name.startswith("ts_"):
-        target_dir, indent = TIMESTAMP_DIR, None
-    else:
-        target_dir, indent = DATA_DIR, 2
+    ### Where it goes: timestamps to their own directory, the datasets the browser reads to
+    ### PUBLIC_DIR, the backend-private ones to STATE_DIR. The registry decides, so the
+    ### allowlist app.py serves from and the routing here cannot disagree.
+    ###
+    ### An unknown name raises out of dataset_kind(). Deliberately: this used to send anything
+    ### it was handed into the one directory the frontend imported from.
+    kind = datasets.dataset_kind(file_name)
+    target_dir = {
+        datasets.TIMESTAMP: TIMESTAMP_DIR,
+        datasets.PUBLIC: PUBLIC_DIR,
+        datasets.STATE: STATE_DIR,
+    }[kind]
+    indent = None if kind == datasets.TIMESTAMP else 2
 
     ### Make sure the data directories exist, since app.py can write files before main.py ever ran
     makedirs(TIMESTAMP_DIR, exist_ok=True)
@@ -1209,17 +1217,15 @@ def write_json_to_file(data, file_name: str) -> None:
 
     file_path = path.join(target_dir, file_name)
 
-    if target_dir == DATA_DIR:
+    ### Both kinds of dataset get a snapshot, timestamps do not - the same split as before
+    ### these directories were separate, when the state files sat in the data directory too.
+    if kind != datasets.TIMESTAMP:
         _snapshot_last_good(file_path, file_name)
 
     ### The temporary file has to sit in the target directory: os.replace() is only atomic
     ### within one filesystem, and a volume mount elsewhere in the tree may well be another
-    ### one. The leading dot keeps it out of the way of anything globbing for *.json.
-    ###
-    ### That does put it inside the directory the dev server watches, which is what the
-    ### .last-good snapshots were moved out of. The difference is that this file appears
-    ### and disappears while the target is being replaced anyway - one more event per
-    ### write, not a second file per dataset - and atomicity leaves no choice.
+    ### one. The leading dot keeps it out of the way of anything globbing for *.json, which
+    ### is what the timestamp index in app.py does.
     handle, temp_path = tempfile.mkstemp(dir=target_dir, prefix=f".{file_name}.", suffix=".tmp")
 
     try:
