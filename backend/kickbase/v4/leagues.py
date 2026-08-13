@@ -193,8 +193,12 @@ def place_offer(token: str, league_id: str, player_id: str, price: int) -> dict:
         response = requests.post(url, json={"price": price},
                                  headers=_offer_headers(token), timeout=OFFER_TIMEOUT)
     except requests.exceptions.RequestException as e:
+        ### The exception message reaches the user, so the urllib3 detail goes to the log
+        ### instead of into the sentence they read
+        logging.error(f"Kickbase write to {url} failed: {e}")
         raise exceptions.KickbaseWriteException(
-            504, f"Kickbase ist nicht erreichbar: {e}") from e
+            504, "Kickbase ist nicht erreichbar. Bitte versuche es in einem Moment erneut."
+        ) from e
 
     if response.status_code >= 400:
         raise _offer_failure(response)
@@ -230,8 +234,12 @@ def remove_offer(token: str, league_id: str, player_id: str, own_user_id: str) -
     try:
         response = requests.delete(url, headers=_offer_headers(token), timeout=OFFER_TIMEOUT)
     except requests.exceptions.RequestException as e:
+        ### The exception message reaches the user, so the urllib3 detail goes to the log
+        ### instead of into the sentence they read
+        logging.error(f"Kickbase write to {url} failed: {e}")
         raise exceptions.KickbaseWriteException(
-            504, f"Kickbase ist nicht erreichbar: {e}") from e
+            504, "Kickbase ist nicht erreichbar. Bitte versuche es in einem Moment erneut."
+        ) from e
 
     if response.status_code >= 400:
         raise _offer_failure(response)

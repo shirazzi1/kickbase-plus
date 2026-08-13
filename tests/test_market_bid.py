@@ -194,6 +194,42 @@ def test_place_offer_reports_an_unreachable_api():
         raise AssertionError("expected a KickbaseWriteException for a connection failure")
 
 
+### The message urllib3 actually produces for a real ConnectTimeout - long, English, and
+### full of internals no user should ever see.
+REALISTIC_CONNECT_TIMEOUT = (
+    "HTTPSConnectionPool(host='api.kickbase.com', port=443): Max retries exceeded with "
+    "url: /v4/leagues/11412166/market/8289/offers (Caused by "
+    "ConnectTimeoutError(<urllib3.connection.HTTPSConnection object>, "
+    "'Connection to api.kickbase.com timed out.'))"
+)
+
+
+def test_place_offer_transport_failure_message_is_clean_german():
+    """The exception message reaches the browser, so it must read like a sentence.
+
+    A raw ConnectTimeout carries a wall of urllib3 internals in English. None of that
+    belongs in front of a user standing at the market waiting to find out why their bid
+    did not go through.
+    """
+    import requests as real_requests
+
+    def place():
+        leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1180000)
+
+    try:
+        with_fake("post", real_requests.exceptions.ConnectTimeout(REALISTIC_CONNECT_TIMEOUT),
+                   place)
+    except exceptions.KickbaseWriteException as e:
+        message = str(e)
+        assert "HTTPSConnectionPool" not in message, f"leaked urllib3 detail: {message}"
+        assert "Max retries" not in message, f"leaked urllib3 detail: {message}"
+        assert "ConnectTimeoutError" not in message, f"leaked urllib3 detail: {message}"
+        assert "Kickbase" in message and "erreichbar" in message, \
+            f"expected a clean German sentence, got: {message}"
+    else:
+        raise AssertionError("expected a KickbaseWriteException for a connection failure")
+
+
 ### ===============================================================================
 ### remove_offer()
 ### ===============================================================================
@@ -234,6 +270,32 @@ def test_remove_offer_surfaces_the_api_message():
         assert "OfferNotFound" in str(e), f"expected the errMsg, got: {e}"
     else:
         raise AssertionError("expected a KickbaseWriteException for a 404")
+
+
+def test_remove_offer_reports_a_clean_german_message_on_transport_failure():
+    """remove_offer() had no transport-failure coverage at all before this test.
+
+    Same requirement as place_offer(): the message reaches the browser, so the urllib3
+    wall of English internals must not reach it either.
+    """
+    import requests as real_requests
+
+    def remove():
+        leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, OWN_USER_ID)
+
+    try:
+        with_fake("delete",
+                   real_requests.exceptions.ConnectTimeout(REALISTIC_CONNECT_TIMEOUT), remove)
+    except exceptions.KickbaseWriteException as e:
+        assert e.status >= 500, f"a transport failure is not the user's fault, got {e.status}"
+        message = str(e)
+        assert "HTTPSConnectionPool" not in message, f"leaked urllib3 detail: {message}"
+        assert "Max retries" not in message, f"leaked urllib3 detail: {message}"
+        assert "ConnectTimeoutError" not in message, f"leaked urllib3 detail: {message}"
+        assert "Kickbase" in message and "erreichbar" in message, \
+            f"expected a clean German sentence, got: {message}"
+    else:
+        raise AssertionError("expected a KickbaseWriteException for a connection failure")
 
 
 ### ===============================================================================
@@ -304,11 +366,15 @@ if __name__ == "__main__":
     check("forwards a real outage as 502", test_place_offer_forwards_a_real_outage_as_502)
     check("passes a 4xx through unchanged", test_place_offer_passes_a_4xx_through_unchanged)
     check("reports an unreachable API", test_place_offer_reports_an_unreachable_api)
+    check("transport failure message is clean German",
+          test_place_offer_transport_failure_message_is_clean_german)
 
     print("\nremove_offer()")
     check("addresses the offer by user id", test_remove_offer_addresses_the_offer_by_user_id)
     check("never calls the bare collection", test_remove_offer_never_calls_the_bare_collection)
     check("surfaces the API message", test_remove_offer_surfaces_the_api_message)
+    check("reports a clean German message on transport failure",
+          test_remove_offer_reports_a_clean_german_message_on_transport_failure)
 
     print("\nown_offer()")
     check("reads the live offer shape", test_own_offer_reads_the_live_offer_shape)
