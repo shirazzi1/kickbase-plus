@@ -412,7 +412,162 @@ def test_a_failed_login_produces_a_manifest_that_is_not_ok():
         runs.end_run()
 
     assert result.all_ok is False, f"got {result.to_dict()}"
-    assert result.stages == [], f"no stage can have run, got {result.stages}"
+    ### The login is not a stage, but it is recorded as one when it fails: an empty
+    ### manifest would say nothing about why the run produced nothing
+    assert [s["name"] for s in result.stages] == ["login"], f"got {result.stages}"
+    assert result.stages[0]["status"] == runs.FAILED, f"got {result.stages[0]}"
+
+
+### ===============================================================================
+### run_once(): whatever kills the run, it still leaves a record
+###
+### The manifest is only worth anything if it is always written. A path that ends the
+### process without one is worse than having none at all: the previous run's manifest
+### stays on disk, every dataset still carries that run's id, and the frontend therefore
+### renders every single table as current - over a run that never happened.
+### ===============================================================================
+
+
+def run_once_with(login_failure):
+    """Run run_once() with a login that fails in the given way.
+
+    Returns:
+        tuple: the manifest it wrote, and the manifest and ts_main it left on disk.
+    """
+    import main
+    from backend.kickbase.v4 import leagues
+
+    tmp = tempfile.TemporaryDirectory()
+    data_dir = path.join(tmp.name, "data")
+    ts_dir = path.join(data_dir, "timestamps")
+    makedirs(ts_dir, exist_ok=True)
+
+    ### What a previous, successful run left behind
+    with open(path.join(ts_dir, "ts_run_manifest.json"), "w") as f:
+        json.dump({"runId": "RUN-1", "allOk": True,
+                   "stages": [{"name": "market", "status": "ok"}]}, f)
+    with open(path.join(ts_dir, "ts_main.json"), "w") as f:
+        json.dump({"time": "2026-08-13T05:00:00", "runId": "RUN-1", "allOk": True}, f)
+
+    original = (main.LOG_DIR, main.TIMESTAMP_DIR, main.DATA_DIR,
+                miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+                miscellaneous.LAST_GOOD_DIR,
+                main.login, leagues.clear_caches)
+
+    main.LOG_DIR = path.join(tmp.name, "logs")
+    main.TIMESTAMP_DIR = ts_dir
+    main.DATA_DIR = data_dir
+    miscellaneous.DATA_DIR = data_dir
+    miscellaneous.TIMESTAMP_DIR = ts_dir
+    miscellaneous.LAST_GOOD_DIR = path.join(tmp.name, "last-good")
+
+    try:
+        from os import environ
+        environ["START_DATE"] = "2026-08-01T18:00:00Z"
+
+        def failing_login():
+            raise login_failure
+
+        main.login = failing_login
+        leagues.clear_caches = lambda: None
+
+        manifest = main.run_once()
+
+        with open(path.join(ts_dir, "ts_run_manifest.json")) as f:
+            written_manifest = json.load(f)
+        with open(path.join(ts_dir, "ts_main.json")) as f:
+            written_main = json.load(f)
+
+        return manifest, written_manifest, written_main
+    finally:
+        (main.LOG_DIR, main.TIMESTAMP_DIR, main.DATA_DIR,
+         miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+         miscellaneous.LAST_GOOD_DIR,
+         main.login, leagues.clear_caches) = original
+        tmp.cleanup()
+        runs.end_run()
+
+
+def assert_the_run_left_an_honest_record(written_manifest, written_main):
+    """Every failure shape has to come out the same way on disk."""
+    assert written_manifest["allOk"] is False, f"got {written_manifest}"
+    assert written_manifest["runId"] != "RUN-1", \
+        "the previous run's manifest is still on disk"
+    assert written_main["allOk"] is False, f"got {written_main}"
+    assert written_main["runId"] == written_manifest["runId"], \
+        f"the timestamp names a different run than the manifest: {written_main}"
+
+
+def test_a_login_that_calls_exit_still_leaves_a_manifest():
+    """exit() raises SystemExit, which is a BaseException and no handler caught it.
+
+    This was the real hole: main.py's login() called exit() when the account had no
+    leagues. The process ended with code 0 - SystemExit(None) reads as success - and left
+    the previous run's manifest in place for the frontend to render green.
+    """
+    _, written_manifest, written_main = run_once_with(SystemExit())
+
+    assert_the_run_left_an_honest_record(written_manifest, written_main)
+    assert any("SystemExit" in (s["error"] or "") for s in written_manifest["stages"]), \
+        f"got {written_manifest['stages']}"
+
+
+def test_a_login_that_raises_an_unexpected_error_still_leaves_a_manifest():
+    """A changed API response is a KeyError, a full disk an OSError. Neither is one of
+    this project's own exception types, and the narrow handler let both through."""
+    for failure in (KeyError("u"), OSError("no space left on device")):
+        _, written_manifest, written_main = run_once_with(failure)
+        assert_the_run_left_an_honest_record(written_manifest, written_main)
+
+
+def test_a_login_that_raises_a_known_error_still_leaves_a_manifest():
+    _, written_manifest, written_main = run_once_with(
+        exceptions.LoginException("[CRITICAL] Login failed!"))
+
+    assert_the_run_left_an_honest_record(written_manifest, written_main)
+
+
+def test_the_exit_code_follows_the_manifest():
+    """The signal entrypoint.py is meant to read in the next step."""
+    manifest, _, _ = run_once_with(SystemExit())
+    assert manifest.all_ok is False, "a failed run must not exit 0"
+
+
+def test_an_account_without_leagues_is_a_login_failure_not_a_process_exit():
+    """A function three levels down is not the place that ends the process."""
+    import main
+    from backend.kickbase.v4 import leagues, user
+
+    class FakeUser:
+        name = "Max"
+        id = "1"
+
+    ### login() reads these as module globals, and main.py only assigns them in its
+    ### __main__ block - so importing it as a module leaves them undefined
+    credentials = {"kb_mail": "a@b.c", "kb_password": "x",
+                   "discord_webhook": "https://d.test/h"}
+    missing = [name for name in credentials if not hasattr(main, name)]
+
+    original = (user.login, leagues.get_league_list)
+    for name, value in credentials.items():
+        setattr(main, name, value)
+
+    try:
+        user.login = lambda *a: (FakeUser(), "token")
+        leagues.get_league_list = lambda token: []
+
+        try:
+            main.login()
+        except exceptions.LoginException as e:
+            assert "No leagues" in str(e), f"got {e}"
+        except SystemExit:
+            raise AssertionError("exit() slips past every handler on the way up")
+        else:
+            raise AssertionError("expected a LoginException")
+    finally:
+        user.login, leagues.get_league_list = original
+        for name in missing:
+            delattr(main, name)
 
 
 ### ===============================================================================
@@ -448,6 +603,13 @@ if __name__ == "__main__":
     check("every stage writes under the same run id", test_every_stage_writes_under_the_same_run_id)
     check("a stale dataset keeps the older run id", test_a_dataset_a_failed_stage_did_not_rewrite_keeps_the_older_run_id)
     check("a failed login produces a manifest that is not ok", test_a_failed_login_produces_a_manifest_that_is_not_ok)
+
+    print("\nrun_once(): whatever kills the run, it still leaves a record")
+    check("a login that calls exit() still leaves a manifest", test_a_login_that_calls_exit_still_leaves_a_manifest)
+    check("an unexpected error still leaves a manifest", test_a_login_that_raises_an_unexpected_error_still_leaves_a_manifest)
+    check("a known error still leaves a manifest", test_a_login_that_raises_a_known_error_still_leaves_a_manifest)
+    check("the exit code follows the manifest", test_the_exit_code_follows_the_manifest)
+    check("no leagues is a login failure, not a process exit", test_an_account_without_leagues_is_a_login_failure_not_a_process_exit)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")

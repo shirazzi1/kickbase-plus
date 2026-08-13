@@ -156,6 +156,20 @@ class RunManifest:
 
         return True
 
+    def record_failure(self, name: str, error: str) -> None:
+        """### Record something that failed outside a stage.
+
+        The login, and whatever kills the run before the stages get their turn. Those
+        never reach run(), but they still have to leave a trace: without one the previous
+        run's manifest stays on disk, every dataset still carries that run's id, and the
+        frontend renders green over a run that never happened.
+
+        Args:
+            name (str): What failed, e.g. "login".
+            error (str): The failure, type and message.
+        """
+        self._record(name, FAILED, 0.0, error=error)
+
     def _record(self, name: str, status: str, duration: float, error: str = None) -> None:
         """### Add one stage result to the manifest.
 

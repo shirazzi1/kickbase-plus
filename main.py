@@ -129,10 +129,14 @@ def build_stages(user_token: str, selected_league: object, own_user_id: str) -> 
     ]
 
 
-def main() -> runs.RunManifest:
+def main(manifest: runs.RunManifest = None) -> runs.RunManifest:
     """### This is the main function of the Kickbase Insights program.
 
     It performs various tasks related to logging, user login, and data retrieval from the Kickbase API.
+
+    Args:
+        manifest (runs.RunManifest): The manifest to fill in. The caller passes one so it
+            still holds the record if this function dies partway through.
 
     Returns:
         runs.RunManifest: What every stage of this run did. The caller writes it out and
@@ -145,9 +149,10 @@ def main() -> runs.RunManifest:
     ### Configure logging with the settings from the dictionary
     dictConfig(build_logging_config(LOG_DIR))
 
-    run_id = runs.start_run()
-    manifest = runs.RunManifest(run_id)
-    logging.info(f"Run {run_id} starting.")
+    if manifest is None:
+        manifest = runs.RunManifest(runs.start_run())
+
+    logging.info(f"Run {manifest.run_id} starting.")
 
     ### Validate START_DATE before doing any work.
     ### entrypoint.py checks this for Docker runs, but running main.py directly skips
@@ -156,7 +161,7 @@ def main() -> runs.RunManifest:
         miscellaneous.get_start_datetime()
     except exceptions.KickbaseException as e:
         logging.error(f"{e} Exiting...")
-        manifest.finish()
+        manifest.record_failure("start_date", f"{type(e).__name__}: {e}")
         return manifest
 
     ### Start every run with empty API caches, so a long lived process (app.py) never
@@ -165,19 +170,23 @@ def main() -> runs.RunManifest:
 
     ### The login is not a stage. Every stage needs the token it returns, so there is
     ### nothing to isolate: without it the run has not begun.
+    ###
+    ### Caught broadly on purpose. The login path reaches Kickbase, parses its answer and
+    ### writes STATIC_users.json, so it can fail in ways that are neither of this
+    ### project's exception types - a changed API response is a KeyError, a full disk an
+    ### OSError. A narrow tuple let those through, and the run then ended without leaving
+    ### any record at all.
     try:
         selected_league, user_token, own_user_id = login()
-    except (exceptions.LoginException, exceptions.KickbaseException) as e:
-        logging.error(f"Login failed, no stage can run: {e}")
-        manifest.finish()
+    except Exception as e:
+        logging.exception(f"Login failed, no stage can run: {e}")
+        manifest.record_failure("login", f"{type(e).__name__}: {e}")
         return manifest
 
     ### Each stage on its own. One that fails costs its own datasets and nothing else,
     ### and the manifest says which ones those were.
     for name, stage in build_stages(user_token, selected_league, own_user_id):
         manifest.run(name, stage)
-
-    manifest.finish()
 
     return manifest
 
@@ -198,11 +207,16 @@ def login() -> tuple:
     user_info, user_token = user.login(kb_mail, kb_password, discord_webhook)
     logging.info(f"Successfully logged in as {user_info.name}")
 
-    ### Get all leagues the user is in
+    ### Get all leagues the user is in.
+    ###
+    ### Raising rather than exit(): a function three levels down is not the place that
+    ### decides the process is over. exit() raises SystemExit, which is a BaseException
+    ### and slipped past every handler on the way up - the run then died without writing
+    ### a manifest, left the previous run's one in place, and exited 0 while it was at it.
     league_list = leagues.get_league_list(user_token)
     if not league_list:
-        logging.error("No leagues found. Exiting...")
-        exit()
+        raise exceptions.LoginException(
+            "No leagues found for this Kickbase account. There is nothing to gather data for.")
     logging.info(f"Available leagues: {', '.join([league.name for league in league_list])}") # Print all available leagues the user is in
 
     return select_league(league_list), user_token, user_info.id
@@ -1124,21 +1138,37 @@ def balances(user_token: str, selected_league: object) -> None:
 ### -------------------------------------------------------------------
 ### -------------------------------------------------------------------
 
-if __name__ == "__main__":
-    ### Try to get the logins and Discord URL from the environment variables (Docker)
-    kb_mail = getenv("KB_MAIL")
-    kb_password = getenv("KB_PASSWORD")
-    discord_webhook = getenv("DISCORD_WEBHOOK")
+def run_once() -> runs.RunManifest:
+    """### Run main() and leave a record of it, whatever happens.
 
-    ### -------------------------------------------------------------------
+    Lives out here rather than inside the `if __name__` block so it can be tested. The
+    block below held the part that decides whether a run is reported as a success, which
+    is exactly the part worth a test.
 
-    tprint("\n\nKB-Insights")
-    print("\x1B[3mby casudo\x1B[0m")
-    print(f"\x1B[3m{__version__}\x1B[0m\n\n")    
-
+    Returns:
+        runs.RunManifest: The record, already written to disk.
+    """
     start_time = time.time()
 
-    manifest = main()
+    ### The manifest is created out here, not inside main(), so it survives main() dying.
+    manifest = runs.RunManifest(runs.start_run())
+
+    try:
+        main(manifest)
+    except BaseException as e:
+        ### BaseException, not Exception. A bare exit() anywhere down the call stack
+        ### raises SystemExit, which is not an Exception and slipped past every handler on
+        ### the way up: the run died silently, the previous manifest stayed on disk, every
+        ### dataset still carried that run's id, and the frontend rendered green over a run
+        ### that never happened. On top of that, exit() with no argument is SystemExit(None),
+        ### which the shell reads as success.
+        ###
+        ### A KeyboardInterrupt lands here too, and recording it as a failed run is the
+        ### honest answer: the run really did not finish.
+        logging.exception(f"The run ended before it could finish: {type(e).__name__}: {e}")
+        manifest.record_failure("run", f"{type(e).__name__}: {e}")
+
+    manifest.finish()
 
     ### The manifest first: it is what the timestamp below now depends on.
     miscellaneous.write_json_to_file(manifest.to_dict(), "ts_run_manifest.json")
@@ -1166,7 +1196,22 @@ if __name__ == "__main__":
     seconds = int(elapsed_time_seconds % 60)
     logging.info(f"DONE in {minutes}m {seconds}s. {manifest.summary()}")
 
+    return manifest
+
+
+if __name__ == "__main__":
+    ### Try to get the logins and Discord URL from the environment variables (Docker)
+    kb_mail = getenv("KB_MAIL")
+    kb_password = getenv("KB_PASSWORD")
+    discord_webhook = getenv("DISCORD_WEBHOOK")
+
+    ### -------------------------------------------------------------------
+
+    tprint("\n\nKB-Insights")
+    print("\x1B[3mby casudo\x1B[0m")
+    print(f"\x1B[3m{__version__}\x1B[0m\n\n")
+
     ### The exit code is the other half of not lying. entrypoint.py runs this with
     ### subprocess.run() and has never looked at the result; once it does, a failed run
     ### can be seen from outside the container without reading a JSON file.
-    exit(0 if manifest.all_ok else 1)
+    exit(0 if run_once().all_ok else 1)

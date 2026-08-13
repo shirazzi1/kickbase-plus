@@ -943,7 +943,10 @@ def write_json_to_file(data, file_name: str) -> None:
         file_name (str): file name
 
     Raises:
-        OSError: The file could not be written.
+        Exception: Anything that goes wrong reaches the caller - an OSError from the disk,
+            a TypeError from a payload json.dump() cannot serialise. That is the point:
+            the stage that was writing has to fail, rather than carry on over a file that
+            was never written.
     """
     ### Check if it is a data or timestamp file
     if file_name.startswith("ts_"):
@@ -963,6 +966,11 @@ def write_json_to_file(data, file_name: str) -> None:
     ### The temporary file has to sit in the target directory: os.replace() is only atomic
     ### within one filesystem, and a volume mount elsewhere in the tree may well be another
     ### one. The leading dot keeps it out of the way of anything globbing for *.json.
+    ###
+    ### That does put it inside the directory the dev server watches, which is what the
+    ### .last-good snapshots were moved out of. The difference is that this file appears
+    ### and disappears while the target is being replaced anyway - one more event per
+    ### write, not a second file per dataset - and atomicity leaves no choice.
     handle, temp_path = tempfile.mkstemp(dir=target_dir, prefix=f".{file_name}.", suffix=".tmp")
 
     try:

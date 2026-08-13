@@ -13,7 +13,8 @@ frontend/build/
 
 ### Snapshots of the previous good copy of each data file. The names end in .last-good
 ### rather than .json, so the wholesale *.json rule above does not cover them.
-data/
+### Anchored: without the leading slash this would also match frontend/src/data.
+/data/
 
 ### Agent worktrees. These are checkouts of this very repository, so committing them
 ### would nest a repo inside itself.
