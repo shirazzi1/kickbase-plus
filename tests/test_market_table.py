@@ -200,27 +200,30 @@ def test_player_statistics_asks_for_german():
     Kickbase localises it on Accept-Language alone; a "lang" or "locale" query parameter
     is ignored. Without the header the tooltip silently reverts to English.
     """
+    from backend.kickbase import http
     from backend.kickbase.v4 import leagues as leagues_v4
 
     captured = {}
 
     class FakeResponse:
+        status_code = 200
+        headers = {}
+
         def json(self):
             return {"i": "663", "stxt": "Muskuläre Probleme - verpasst nächsten beiden Testspiele"}
 
-    class FakeRequests:
+    class FakeSession:
         @staticmethod
         def get(url, headers=None, **kwargs):
             captured["headers"] = headers or {}
             return FakeResponse()
 
-    original = leagues_v4.requests
     leagues_v4.clear_caches()
     try:
-        leagues_v4.requests = FakeRequests
+        http.reset_session(FakeSession)
         leagues_v4.player_statistics("token", LEAGUE_ID, "663")
     finally:
-        leagues_v4.requests = original
+        http.reset_session()
         leagues_v4.clear_caches()
 
     language = captured["headers"].get("Accept-Language", "")

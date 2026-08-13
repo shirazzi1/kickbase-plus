@@ -20,6 +20,7 @@ from os import environ, makedirs, path
 sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
 
 from backend import miscellaneous
+from backend.kickbase import http
 from backend.kickbase.v4 import competitions, leagues
 
 ### ===============================================================================
@@ -56,6 +57,7 @@ class FakeResponse:
     def __init__(self, payload, status_code=200):
         self._payload = payload
         self.status_code = status_code
+        self.headers = {}
 
     def json(self):
         return self._payload
@@ -107,8 +109,8 @@ def test_a_missing_start_date_falls_back_to_the_full_year():
 
 
 def use_fake(handler):
-    """Swap the requests module inside the leagues module and reset the caches."""
-    class FakeRequests:
+    """Swap the pooled HTTP session and reset the caches."""
+    class FakeSession:
         def __init__(self):
             self.urls = []
 
@@ -116,8 +118,8 @@ def use_fake(handler):
             self.urls.append(url)
             return handler(url)
 
-    fake = FakeRequests()
-    leagues.requests = fake
+    fake = FakeSession()
+    http.reset_session(fake)
     leagues.clear_caches()
     return fake
 
@@ -192,6 +194,88 @@ def test_a_history_that_cannot_be_read_at_all_raises():
         raise AssertionError("expected a KickbaseException")
     finally:
         leagues.clear_caches()
+        http.reset_session()
+
+
+def test_a_server_error_on_the_short_window_still_tries_the_full_year():
+    """A 500 is the likeliest way Kickbase says "I do not serve that".
+
+    The only evidence in this repository of how it answers for a resource it does not
+    have is the note in competitions.get_team_overview(): team ids 33 and 38 give a 500,
+    not a 404. So the shorter window - which nobody has been able to verify against the
+    live API - may well be rejected the same way, and reading that as an outage would
+    make the fallback unreachable.
+
+    The cost of being wrong is one extra request per run; the cost of not trying would be
+    every run failing until somebody reads the log.
+    """
+    from backend import exceptions
+
+    set_start_date(START)
+    fake = use_fake(lambda url: FakeResponse({}, status_code=500))
+
+    try:
+        leagues.player_marketvalue("token", "755")
+    except exceptions.ApiUnavailableException:
+        pass
+    except Exception as e:
+        raise AssertionError(f"expected ApiUnavailableException, got {type(e).__name__}: {e}")
+    else:
+        raise AssertionError("expected ApiUnavailableException")
+    finally:
+        leagues.clear_caches()
+        http.reset_session()
+
+    assert len(fake.urls) == 2, f"expected the short window and then the year, got {fake.urls}"
+    assert fake.urls[-1].endswith("/marketValue/365"), f"got {fake.urls}"
+
+
+def test_a_server_error_on_the_full_year_is_a_real_outage():
+    """Once the widest window fails there is nothing left to try, so the run must stop.
+
+    Swallowing this would hand every caller an empty history, and an empty history is
+    what invents buy prices of zero.
+    """
+    from backend import exceptions
+
+    set_start_date(START)
+    fake = use_fake(lambda url: FakeResponse({}, status_code=503))
+
+    try:
+        leagues.player_marketvalue("token", "755", days=365)
+    except exceptions.ApiUnavailableException:
+        pass
+    except Exception as e:
+        raise AssertionError(f"expected ApiUnavailableException, got {type(e).__name__}: {e}")
+    else:
+        raise AssertionError("expected ApiUnavailableException")
+    finally:
+        leagues.clear_caches()
+        http.reset_session()
+
+    assert len(fake.urls) == 1, f"there is no wider window to fall back to: {fake.urls}"
+
+
+def test_an_expired_token_is_never_read_as_an_unserved_window():
+    """Widening the window would spend a second request on a token that is simply gone."""
+    from backend import exceptions
+
+    set_start_date(START)
+    fake = use_fake(lambda url: FakeResponse({}, status_code=401))
+
+    try:
+        leagues.player_marketvalue("token", "755")
+    except exceptions.AuthExpiredException:
+        pass
+    except Exception as e:
+        raise AssertionError(f"expected AuthExpiredException, got {type(e).__name__}: {e}")
+    else:
+        raise AssertionError("expected AuthExpiredException")
+    finally:
+        leagues.clear_caches()
+        http.reset_session()
+
+    assert len(fake.urls) == 1, f"an auth failure must not be retried wider: {fake.urls}"
 
 
 ### ===============================================================================
@@ -310,6 +394,9 @@ if __name__ == "__main__":
     check("a rejected window falls back to a year", test_a_window_kickbase_rejects_falls_back_to_a_year)
     check("the fallback is remembered for the run", test_the_fallback_is_remembered_for_the_rest_of_the_run)
     check("an unreadable history raises", test_a_history_that_cannot_be_read_at_all_raises)
+    check("a 5xx on the short window still tries the year", test_a_server_error_on_the_short_window_still_tries_the_full_year)
+    check("a 5xx on the full year is a real outage", test_a_server_error_on_the_full_year_is_a_real_outage)
+    check("an expired token is never read as an unserved window", test_an_expired_token_is_never_read_as_an_unserved_window)
 
     print("\nteam_value_per_match_day()")
     check("one ranking request per played match day", test_one_ranking_request_per_played_match_day)

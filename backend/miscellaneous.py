@@ -17,6 +17,7 @@ from zoneinfo import ZoneInfo
 from backend.paths import DATA_DIR, TIMESTAMP_DIR
 
 from backend import exceptions
+from backend.kickbase import http
 
 ### ===============================================================================
 
@@ -163,10 +164,10 @@ def discord_notification(title: str, message: str, color: int, webhook_url: str)
         webhook_url (str): Webhook URL to send the notification to.
 
     Raises:
-        WIP! TODO!
+        exceptions.NotificatonException: The webhook could not be reached or refused the
+            message. Here the message really is about the webhook - unlike the fifteen
+            Kickbase call sites that used to borrow it.
     """
-    url = webhook_url
-    headers = {"Content-Type": "application/json"}
     payload = {
         "username": "Kickbase",
         "avatar_url": "https://upload.wikimedia.org/wikipedia/commons/2/2c/Kickbase_Logo.jpg",
@@ -179,11 +180,14 @@ def discord_notification(title: str, message: str, color: int, webhook_url: str)
         ]
     }
 
-    ### Send POST request to Webhook
+    ### Send POST request to Webhook. Routed through the shared client for the timeout:
+    ### this call had none either, and a stalled Discord parked the run just as surely as
+    ### a stalled Kickbase did.
     try:
-        requests.post(url, json=payload, headers=headers)
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.")
+        http.post_no_json(webhook_url, payload)
+    except exceptions.HttpException as e:
+        raise exceptions.NotificatonException(
+            f"Notification failed! Please check your Discord Webhook URL. {e}") from e
 
 
 def calculate_revenue_data_daily(turnovers: dict) -> None:

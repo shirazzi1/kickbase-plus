@@ -5,11 +5,11 @@ TODO: Maybe list all functions here automatically?
 """
 
 import logging
-import requests
 
 from concurrent.futures import ThreadPoolExecutor
 
 from backend import exceptions, miscellaneous
+from backend.kickbase import http
 from backend.kickbase.endpoints.leagues import League_Info, Market_Players
 
 ### -------------------------------------------------------------------
@@ -62,18 +62,10 @@ def get_league_list(token: str) -> list:
         list: List of all leagues the user is in.
     """
     url = "https://api.kickbase.com/v4/leagues/selection"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     ### Send GET request
-    try:
-        json_response = requests.get(url, headers=headers).json()
-    except:
-        raise exceptions.KickbaseException("An exception was raised.") # TODO: Change
-    
+    json_response = http.get_json(url, token)
+
     ### Iterating over the json response, where each entry is expected to be a dictionary. For each entry, it creates a new Leagues_Info object.
     league_list = [League_Info(entry) for entry in json_response["it"]]
 
@@ -98,18 +90,10 @@ def get_market(token: str, league_id: str):
     Obviously the "it" list is filled with all players on the market.
     """
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/market"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     ### Send GET request to get all free players in the given league
-    try:
-        json_response = requests.get(url, headers=headers).json()
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") # TODO: Change exception
-    
+    json_response = http.get_json(url, token)
+
     ### Create a new object for every entry in the json_response["it"] list.
     players_on_market = [Market_Players(player) for player in json_response["it"]]
 
@@ -163,21 +147,13 @@ def player_statistics(token: str, league_id: str, player_id: str):
         return _player_statistics_cache[cache_key]
 
     url = f"https://api.kickbase.com/v4/competitions/1/players/{player_id}?leagueId={league_id}"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        ### The status note ("stxt") is the only prose in this response and defaults to
-        ### English. The frontend is German, so ask for German. Kickbase localises on this
-        ### header only: a "lang"/"locale" query parameter is ignored.
-        "Accept-Language": "de-DE,de;q=0.9",
-        "Cookie": f"kkstrauth={token};",
-    }
 
-    ### Send GET request to get the market value changes of ALL players in the league
-    try:
-        json_response = requests.get(url, headers=headers).json()
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") # TODO: Change exception
+    ### Send GET request to get the market value changes of ALL players in the league.
+    ### The status note ("stxt") is the only prose in this response and defaults to
+    ### English. The frontend is German, so ask for German. Kickbase localises on this
+    ### header only: a "lang"/"locale" query parameter is ignored.
+    json_response = http.get_json(url, token,
+                                  extra_headers={"Accept-Language": "de-DE,de;q=0.9"})
 
     _player_statistics_cache[cache_key] = json_response
 
@@ -218,9 +194,13 @@ def player_marketvalue(token: str, player_id: str, days: int = None):
     ### /marketValue/365 is the only window this project has ever asked for, so a shorter
     ### one going unanswered is a real possibility. Falling back keeps the run alive, and
     ### remembering the fallback keeps it to one wasted request instead of one per player.
+    ### If Kickbase is simply down, this costs exactly one extra request before the wider
+    ### window fails too and the run stops - see _fetch_marketvalue() for why the 5xx is
+    ### not assumed to be an outage on the first attempt.
     if history is None and days != miscellaneous.MAX_MARKET_VALUE_DAYS:
-        logging.warning(f"Kickbase did not serve a {days} day market value window. "
-                        f"Falling back to {miscellaneous.MAX_MARKET_VALUE_DAYS} days for the rest of this run.")
+        logging.warning(f"Kickbase did not answer a {days} day market value window (the reason "
+                        f"is in the DEBUG log). Falling back to "
+                        f"{miscellaneous.MAX_MARKET_VALUE_DAYS} days for the rest of this run.")
         _market_value_days = miscellaneous.MAX_MARKET_VALUE_DAYS
         history = _fetch_marketvalue(token, player_id, _market_value_days)
 
@@ -245,27 +225,32 @@ def _fetch_marketvalue(token: str, player_id: str, days: int):
         list: The "it" list, or None if Kickbase did not answer with one.
     """
     url = f"https://api.kickbase.com/v4/competitions/1/players/{player_id}/marketValue/{days}"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
+
+    ### A window the API does not serve reads as an answer here rather than as a failure,
+    ### so player_marketvalue() can widen it. Which statuses mean that is not obvious:
+    ### the only evidence in this repository of how Kickbase answers for a resource it
+    ### does not have is the note in competitions.get_team_overview(), and it says 500.
+    ### So a server error counts as "not served" too - but only while there is a wider
+    ### window left to try. Once the request is already at MAX_MARKET_VALUE_DAYS, the
+    ### same 5xx is a real outage and travels on, so a broken Kickbase still fails loudly
+    ### instead of silently producing histories nobody can read.
+    ###
+    ### Everything else - an expired token, a rate limit, a hung socket - always travels
+    ### on to the caller.
+    unserved = (exceptions.ApiRequestException, exceptions.ApiResponseException)
+
+    if days != miscellaneous.MAX_MARKET_VALUE_DAYS:
+        unserved += (exceptions.ApiUnavailableException,)
 
     ### Send GET request to get the market value history of the given player
     try:
-        response = requests.get(url, headers=headers)
-    except Exception as e:
-        raise exceptions.KickbaseException(
-            f"Couldn't reach Kickbase for the market value history of player {player_id}: {e}")
-
-    ### A window the API does not serve comes back as an error status, not as an exception
-    if response.status_code != 200:
+        json_response = http.get_json(url, token)
+    except unserved as e:
+        logging.debug(f"Kickbase did not answer a {days} day market value window for "
+                      f"player {player_id}: {e}")
         return None
 
-    try:
-        return response.json()["it"]
-    except Exception:
-        return None
+    return json_response.get("it")
 
 
 def get_users(token: str, league_id: str):
@@ -273,18 +258,10 @@ def get_users(token: str, league_id: str):
     ### Get all users and their IDs in the lague.
     """
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/overview?includeManagersAndBattles=true"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     ### Send GET request to get the market value changes of ALL players in the league
-    try:
-        json_response = requests.get(url, headers=headers).json()
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") # TODO: Change exception
-    
+    json_response = http.get_json(url, token)
+
     ### Create a dictionary to map user IDs to user names
     user_id_to_name = {user["i"]: user["n"] for user in json_response["us"]}
     miscellaneous.write_json_to_file(user_id_to_name, "STATIC_users.json")
@@ -315,17 +292,9 @@ def transfers(token: str, league_id: str) -> dict:
     while True:
         query_params = f"?max=26&start={start_point}"
         url = f"https://api.kickbase.com/v4/leagues/{league_id}/activitiesFeed/{query_params}"
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Cookie": f"kkstrauth={token};",
-        }
 
         ### Send GET request to get the next 26 entries
-        try:
-            json_response = requests.get(url, headers=headers).json()
-        except Exception as e:
-            raise exceptions.NotificatonException(f"Notification failed! Please check your Discord Webhook URL. Error: {e}") # TODO: Change exception
+        json_response = http.get_json(url, token)
 
         ### Filter transfers where "t" == 15
         filtered_transfers = [entry for entry in json_response.get("af", []) if entry.get("t") == 15]
@@ -354,17 +323,9 @@ def user_stats(token: str, league_id: str, user_id: str) -> dict:
         return _user_stats_cache[cache_key]
 
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/managers/{user_id}/dashboard"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     ### Send GET request to get the statistics of a given user in the given league
-    try:
-        json_response = requests.get(url, headers=headers).json()
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") ### TODO: Change exception
+    json_response = http.get_json(url, token)
 
     _user_stats_cache[cache_key] = json_response
 
@@ -383,17 +344,9 @@ def user_performance(token: str, league_id: str, user_id: str) -> dict:
         return _user_performance_cache[cache_key]
 
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/managers/{user_id}/performance"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     ### Send GET request to get the statistics of a given user in the given league
-    try:
-        json_response = requests.get(url, headers=headers).json()
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") ### TODO: Change exception
+    json_response = http.get_json(url, token)
 
     _user_performance_cache[cache_key] = json_response
 
@@ -406,19 +359,9 @@ def ranking(token: str, league_id: str, match_day: int) -> dict:
     """
     query_params = f"?dayNumber={match_day}"
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/ranking/{query_params}"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     ### Send GET request to get the ranking of the league
-    try:
-        json_response = requests.get(url, headers=headers).json()
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") ### TODO: Change exception
-    
-    return json_response
+    return http.get_json(url, token)
 
 
 def live_points(token: str, league_id: str) -> dict:
@@ -445,19 +388,9 @@ def live_points(token: str, league_id: str) -> dict:
     on-hold, so this call is unverified against the current API.
     """
     url = f"https://api.kickbase.com/leagues/{league_id}/live"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     ### Send GET request to get the live points of the league
-    try:
-        json_response = requests.get(url, headers=headers).json()
-    except:
-        raise exceptions.KickbaseException("Couldn't get the live points of the league.")
-
-    return json_response
+    return http.get_json(url, token)
 
 
 def battles(token: str, league_id: str, battle_id: int) -> dict:
@@ -473,17 +406,9 @@ def battles(token: str, league_id: str, battle_id: int) -> dict:
         return _battles_cache[cache_key]
 
     url = f"https://api.kickbase.com/v4/leagues/{league_id}/battles/{battle_id}/users"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     ### Send GET request to get the battles of the league
-    try:
-        json_response = requests.get(url, headers=headers).json()
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") ### TODO: Change exception
+    json_response = http.get_json(url, token)
 
     _battles_cache[cache_key] = json_response
 
