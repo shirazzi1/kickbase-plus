@@ -5,7 +5,7 @@ from flask import Flask, jsonify
 from flask_cors import CORS
 
 import main
-from backend import exceptions
+from backend import exceptions, health
 from backend.kickbase.v4 import leagues, user
 
 ### ===============================================================================
@@ -19,6 +19,29 @@ discord_webhook = getenv("DISCORD_WEBHOOK")
 
 app = Flask(__name__)
 CORS(app)  # This will enable CORS for all routes
+
+
+@app.route("/api/health", methods=["GET"])
+def get_health():
+    """### Says whether this deployment is still doing its job.
+
+    Answering at all shows Flask is up. The body says whether the data behind it is being
+    kept current, read off the run manifest.
+
+    The status code is a restart signal, so it deliberately does not follow "was the last
+    run perfect". A stage that failed against a Kickbase outage answers 200: restarting
+    the container would not have made Kickbase reply. A scheduler that has stopped
+    answers 503, because that is a problem a restart does fix.
+    """
+    report = health.health_report()
+
+    if health.is_healthy(report):
+        return jsonify(report), 200
+
+    logging.warning(f"Health check: {report['status']} - {report['reason']}")
+
+    return jsonify(report), 503
+
 
 @app.route("/api/livepoints", methods=["GET"])
 def get_live_points():
