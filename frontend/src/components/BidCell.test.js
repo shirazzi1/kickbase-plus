@@ -85,3 +85,92 @@ describe("BidCell at rest", () => {
         expect(hint.getAttribute("title")).not.toMatch(/unter dem Preis/)
     })
 })
+
+describe("BidCell while editing", () => {
+    const editing = (overrides, props) => render(
+        <BidCell
+            row={row(overrides)}
+            growthDays={3}
+            targetDays={3}
+            editing
+            draft={props?.draft ?? "1180000"}
+            onEdit={() => {}}
+            onDraftChange={() => {}}
+            onSubmit={() => {}}
+            onWithdraw={() => {}}
+            onCancel={() => {}}
+            {...props}
+        />
+    )
+
+    it("shows the draft in an input with German thousands separators", () => {
+        editing()
+        expect(screen.getByRole("textbox")).toHaveValue("1.180.000")
+    })
+
+    it("submits on the checkmark", async () => {
+        const onSubmit = jest.fn()
+        editing({}, { onSubmit })
+        await userEvent.click(screen.getByLabelText("Gebot abgeben"))
+        expect(onSubmit).toHaveBeenCalled()
+    })
+
+    it("submits on Enter", async () => {
+        const onSubmit = jest.fn()
+        editing({}, { onSubmit })
+        await userEvent.type(screen.getByRole("textbox"), "{Enter}")
+        expect(onSubmit).toHaveBeenCalled()
+    })
+
+    it("cancels on the X when no bid is placed", async () => {
+        const onCancel = jest.fn()
+        const onWithdraw = jest.fn()
+        editing({ ownBid: null }, { onCancel, onWithdraw })
+        const x = screen.getByLabelText("Abbrechen")
+        await userEvent.click(x)
+        expect(onCancel).toHaveBeenCalled()
+        expect(onWithdraw).not.toHaveBeenCalled()
+    })
+
+    it("withdraws on the X when a bid is placed", async () => {
+        // Same icon, two meanings - the tooltip and the label say which one applies
+        const onCancel = jest.fn()
+        const onWithdraw = jest.fn()
+        editing({ ownBid: 1250000 }, { onCancel, onWithdraw })
+        await userEvent.click(screen.getByLabelText("Gebot zurückziehen"))
+        expect(onWithdraw).toHaveBeenCalled()
+        expect(onCancel).not.toHaveBeenCalled()
+    })
+
+    it("cancels on Escape", async () => {
+        const onCancel = jest.fn()
+        editing({}, { onCancel })
+        await userEvent.type(screen.getByRole("textbox"), "{Escape}")
+        expect(onCancel).toHaveBeenCalled()
+    })
+
+    it("reports the typed value as digits only", async () => {
+        const onDraftChange = jest.fn()
+        editing({}, { onDraftChange, draft: "" })
+        await userEvent.type(screen.getByRole("textbox"), "1200000")
+        expect(onDraftChange).toHaveBeenLastCalledWith("1200000")
+    })
+
+    it("disables both actions while a request is in flight", () => {
+        render(
+            <BidCell
+                row={row()} growthDays={3} targetDays={3}
+                editing pending draft="1180000"
+                onEdit={() => {}} onDraftChange={() => {}} onSubmit={() => {}}
+                onWithdraw={() => {}} onCancel={() => {}}
+            />
+        )
+        expect(screen.getByRole("progressbar")).toBeInTheDocument()
+        expect(screen.queryByLabelText("Gebot abgeben")).not.toBeInTheDocument()
+    })
+
+    it("cannot submit an empty draft", () => {
+        editing({}, { draft: "" })
+        expect(screen.getByLabelText("Gebot abgeben")).toBeDisabled()
+    })
+})

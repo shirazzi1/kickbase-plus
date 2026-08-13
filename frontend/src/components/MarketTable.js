@@ -1,9 +1,14 @@
+import { useState } from "react"
 import Tooltip from "@mui/material/Tooltip"
-import { Box, alpha, useTheme } from "@mui/material"
+import {
+    Box, Button, Dialog, DialogActions, DialogContent, DialogContentText, DialogTitle,
+    Snackbar, Alert, alpha, useTheme
+} from "@mui/material"
 import PagedDataGrid from "./PagedDataGrid"
 import BidCell from "./BidCell"
 import {
     percentFormatter,
+    currencyFormatter,
     currencyOrDash,
     percentOrDash,
     deltaCellClassName,
@@ -44,6 +49,66 @@ const changeColumns = (field, label, width) => [
 
 function MarketTable() {
     const theme = useTheme()
+
+    // The editing state lives here rather than in the cell: renderCell re-runs on every
+    // scroll and every sort, and state held inside a cell would not survive either.
+    const [edit, setEdit] = useState(null)          // { playerId, draft }
+    const [pendingId, setPendingId] = useState(null)
+    // Confirmed bids, keyed by player. market.json is imported at build time, so this is
+    // what shows a bid before the patched file has been picked up.
+    const [bids, setBids] = useState({})
+    const [error, setError] = useState(null)
+    const [confirming, setConfirming] = useState(null)   // { playerId, price }
+
+    const closeEdit = () => setEdit(null)
+
+    // The suggestion is the honest yardstick for a typo: one digit too many is always a
+    // factor of ten, so twice the suggestion catches it on a cheap player as well as on
+    // an expensive one, which a fixed euro threshold does not.
+    const needsConfirmation = (row, price) => {
+        const reference = row.suggestedBid || row.marketValue
+        return Boolean(reference) && price >= 2 * reference
+    }
+
+    const send = async (playerId, price) => {
+        setPendingId(playerId)
+        setConfirming(null)
+
+        try {
+            const response = await fetch(`/api/market/${playerId}/bid`, {
+                method: price === null ? "DELETE" : "POST",
+                headers: { "Content-Type": "application/json" },
+                body: price === null ? undefined : JSON.stringify({ price })
+            })
+            const body = await response.json().catch(() => ({}))
+
+            if (!response.ok) {
+                setError(body.error || `Kickbase antwortete mit HTTP ${response.status}.`)
+                return
+            }
+
+            // What Kickbase confirmed, not what was typed
+            setBids((current) => ({ ...current, [playerId]: body.ownBid }))
+            closeEdit()
+        } catch (e) {
+            // A network failure rather than an HTTP status: naming the cause beats
+            // "Gebot fehlgeschlagen", which would send you looking at Kickbase
+            setError("Die Flask-API ist nicht erreichbar. Läuft app.py?")
+        } finally {
+            setPendingId(null)
+        }
+    }
+
+    const submit = (row) => {
+        const price = Number(edit.draft)
+        if (!price)
+            return
+
+        if (needsConfirmation(row, price))
+            setConfirming({ playerId: row.playerId, price })
+        else
+            send(row.playerId, price)
+    }
 
     // Define the columns of the table
     const columns = [
@@ -169,7 +234,18 @@ function MarketTable() {
                     row={params.row}
                     growthDays={config.bepGrowthDays}
                     targetDays={config.bepTargetDays}
-                    onEdit={() => {}}
+                    editing={edit?.playerId === params.row.playerId}
+                    draft={edit?.playerId === params.row.playerId ? edit.draft : ""}
+                    pending={pendingId === params.row.playerId}
+                    onEdit={() => setEdit({
+                        playerId: params.row.playerId,
+                        // The running bid if there is one, else the suggestion, else empty
+                        draft: String(params.row.ownBid ?? params.row.suggestedBid ?? "")
+                    })}
+                    onDraftChange={(draft) => setEdit((current) => ({ ...current, draft }))}
+                    onSubmit={() => submit(params.row)}
+                    onWithdraw={() => send(params.row.playerId, null)}
+                    onCancel={closeEdit}
                 />
             )
         },
@@ -230,7 +306,8 @@ function MarketTable() {
             // The bid that would break even after BEP_TARGET_DAYS days. Kept apart from
             // ownBid so the column still sorts by the real bid.
             suggestedBid: breakEvenBid(row, config.bepTargetDays),
-            ownBid: row.ownBid,
+            // A bid confirmed this session overrides what market.json was built with
+            ownBid: row.playerId in bids ? bids[row.playerId] : row.ownBid,
             today: row.today,
             todayPercent: relativeChange(row.today, row.marketValue),
             yesterday: row.yesterday,
@@ -269,6 +346,26 @@ function MarketTable() {
                 getRowClassName={(params) => params.row.isFreeAgent ? "free-agent-row" : ""}
                 initialState={{ sorting: { sortModel: [{ field: "expiration", sort: "asc" }] } }}
             />
+
+            <Dialog open={Boolean(confirming)} onClose={() => setConfirming(null)}>
+                <DialogTitle>Gebot bestätigen</DialogTitle>
+                <DialogContent>
+                    <DialogContentText>
+                        {confirming && `Wirklich ${currencyFormatter.format(confirming.price)} bieten? `
+                            + "Das ist mindestens das Doppelte des Vorschlags."}
+                    </DialogContentText>
+                </DialogContent>
+                <DialogActions>
+                    <Button onClick={() => setConfirming(null)}>Abbrechen</Button>
+                    <Button onClick={() => send(confirming.playerId, confirming.price)} autoFocus>
+                        Gebot abgeben
+                    </Button>
+                </DialogActions>
+            </Dialog>
+
+            <Snackbar open={Boolean(error)} autoHideDuration={8000} onClose={() => setError(null)}>
+                <Alert severity="error" onClose={() => setError(null)}>{error}</Alert>
+            </Snackbar>
         </Box>
     )
 }

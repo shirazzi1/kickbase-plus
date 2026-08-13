@@ -17,6 +17,7 @@ This is a hobby project to test stuff with JSON and the cores of Python. Feel fr
 
 ##### Table of Contents
 - [Screenshots](#screenshots)
+- [Transfermarkt](#transfermarkt)
 - [Docker](#docker)
   - [docker run](#docker-run)
   - [Docker Compose](#docker-compose)
@@ -37,6 +38,18 @@ As of v1.4.0
 ![MarketValue](repo_pictures/marketvalue.png)  
 ![Revenue](repo_pictures/revenue.png)  
 ![LivePoints](repo_pictures/livepoints.png)  
+
+## Transfermarkt
+The "Dein Gebot" column shows, greyed out, the bid that would break even after
+`BEP_TARGET_DAYS` days at the average daily market value growth of the last
+`BEP_GROWTH_DAYS` days. Clicking the cell makes it editable: the checkmark places the bid
+with Kickbase, the X withdraws a bid that is already standing. A dash means the market
+value is currently flat or falling, or that the history is too short — the cell can still
+be clicked to bid anyway.
+
+This is the one feature that writes to Kickbase, so it needs the Flask API (`app.py`)
+running alongside the frontend. Without it the cell reports that the API is unreachable;
+everything else in the table keeps working.
 
 ## Docker
 If you want to run this in a Docker container, you'll first need to set some mandatory environment variables:  
