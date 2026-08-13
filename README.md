@@ -54,14 +54,22 @@ If you want to run this in a Docker container, you'll first need to set some man
 | `START_DATE` | **Yes** | The instant the season started or your league was reset, as an ISO 8601 timestamp with an explicit UTC offset, e.g. `2026-08-01T18:00:00Z`. Events in the Kickbase activity feed from before this instant are excluded from the transfer, revenue and balance calculations. |
 | `START_MONEY` | No | The amount of money you started with. If not set, defaults to 50.000.000€ |
 | `TZ` | No | The timezone to use. Defaults to `Europe/Berlin` |
+| `FLASK_PORT` | No | The port the dashboard and the API are served on. Defaults to `5000`. |
 
 > [!IMPORTANT]
 > The format of `START_DATE` changed: the old `dd.mm.yyyy` format is no longer accepted and now causes a hard error on startup.
 > If you are upgrading, migrate your value to an ISO 8601 timestamp with an explicit UTC offset (e.g. `2026-08-01T18:00:00Z`) and use the actual time of day the season started or your league was reset - the container will refuse to start otherwise.
 
 > [!IMPORTANT]
-> The live points feature is currently on-hold and not present as of v2.4.0!
-> To handle the re-implementation of the live points with more ease, the ports for the backend are not commented out.
+> **One port now.** The container used to publish 3000 (a create-react-app dev server) and 5000
+> (the API). Flask serves both the dashboard and the API from **5000**, or from `FLASK_PORT` if
+> you set it. A `-p 3000:3000` from an older setup has nothing behind it any more.
+
+> [!IMPORTANT]
+> The Live tab shows the last live-points snapshot that was taken, not a live one: no scheduled
+> run fetches them. Its age is shown in the tab. Refreshing them means calling
+> `/api/livepoints`, which performs a full Kickbase login per request - which is why nothing in
+> the UI does it for you.
 
 ### Persistent data
 **Mount `/code/data`.** Everything the container cannot fetch again lives there, and
@@ -69,6 +77,8 @@ without the mount it is deleted on every image pull:
 
 | Path | What it holds |
 | --- | --- |
+| `/code/data/public/` | The datasets the dashboard reads, served under `/api/data/<name>`, plus `timestamps/`. Rewritten by every run. |
+| `/code/data/state/` | What only the backend reads: the season's activity feed (`all_transfers.json`), the achievement ledger and the id-to-name tables. |
 | `/code/data/history/<dataset>/<YYYY-MM-DD>.ndjson` | The append-only history: one line per run per dataset, `{"ts": ..., "rows": ...}`. |
 | `/code/data/last-good/` | The previous copy of each data file, kept before it is overwritten. |
 | `/code/data/market-values/<player_id>.json` | One player's market value curve, plus the marker that says whether it is still current. |
@@ -86,8 +96,16 @@ data is worth more than the disk. If it ever needs to shrink, the day files are 
 and compress to about a tenth of their size, so `gzip` on everything older than a week is
 the obvious first move.
 
-Everything else - the JSON the frontend reads, the logs - is rebuilt by the next scheduled
-run and does not need a mount.
+`data/public` and `data/state` are rebuilt by the next scheduled run, so losing them costs one
+run rather than data - but they are inside the mount anyway, which is what keeps the dashboard
+from being empty between an image pull and the first run finishing. Only the logs are outside it.
+
+**Upgrading from a version before this one:** these two directories are new. Everything that
+used to sit in `frontend/src/data` is moved into them once, on the first start, by
+`backend/state_migration.py` - it moves rather than copies, never overwrites a file the new
+version already wrote, and never fails the start. Nothing to do by hand. If the old directory
+still holds files afterwards, they are ones this project does not recognise, and the log says
+which.
 
 #### The two caches
 Both are rebuilt from Kickbase if they are lost, so losing them costs requests rather than
@@ -118,7 +136,7 @@ competition is thrown away and the ids are looked for again.
 docker run -d \
     --name=kickbase_insights \
     --restart=unless-stopped \
-    -p <frontend_port>:3000 -p <backend_port>:5000 \
+    -p <port>:5000 \
     -e KB_MAIL=<kickbase_email> \
     -e KB_PASSWORD=<kickbase_password> \
     -e DISCORD_WEBHOOK=<discord_webhook> \
@@ -138,8 +156,7 @@ services:
     container_name: kickbase_insights
     restart: unless-stopped
     ports:
-      - <frontend_port>:3000 # Web GUI
-      - <backend_port>:5000 # Backend API (../api/livepoints)  
+      - <port>:5000 # Dashboard and API, one port
     environment:
       - KB_MAIL=<kickbase_email>
       - KB_PASSWORD=<kickbase_password>
@@ -154,7 +171,7 @@ services:
 
 ### Health check
 The container reports its own state, so `docker ps` shows `healthy` or `unhealthy` instead
-of just `Up`. The details are at `http://<host>:<backend_port>/api/health`:
+of just `Up`. The details are at `http://<host>:<port>/api/health`:
 
 | Status | Meaning | HTTP |
 |---|---|---|
@@ -171,52 +188,40 @@ The threshold for `stale` follows `RUN_SCHEDULE`, so changing the schedule moves
 instead of quietly invalidating it.
 
 Discord gets one message when the runs start failing and one when they work again, plus a
-note whenever the frontend or the API had to be restarted.
+note whenever the API had to be restarted.
+
+### The HTTP surface
+| Route | What it is |
+|---|---|
+| `/` and everything that is not `/api/...` | The prebuilt dashboard. |
+| `/api/data/<name>` | One dataset out of `data/public`, from an allowlist. A dataset no run has written yet answers 404 with `"written": false`, and the dashboard renders that as an empty state. |
+| `/api/data/timestamps` | Every `ts_*.json` in one document, keyed without the `ts_` prefix. The freshness markers are read from this, and it is polled once a minute so a finished run reaches an open tab without a reload. |
+| `/api/health` | See above. |
+| `/api/livepoints` | Fetches the live points from Kickbase. Performs a **full login per request**; nothing in the UI calls it. |
 
 ---
 
-If you run this container in your LAN (via IP), you'll need to change the following line in the `App.js` file in the `frontend/src` folder to this (obv. change `<backend_port>`):     
-```js
-const response = await fetch('http://localhost:<backend_port>/api/livepoints')
-```  
+Behind a reverse proxy this is now a single service. In Traefik:
 
-If you make this container publically available via a domain, you'll need to create/update the following entry in your reverse proxy:  
-`your.domain.com -> <container_ip_or_hostname>:3000`  
-`your.domain.com/api/livepoints -> <container_ip_or_hostname>:5000`  
-> [!IMPORTANT]
-In order to this to work, both your reverse proxy and the container need to be in the same network.  
-
-In Traefik, the dynamic config would look like this:  
 ```yaml
 http:
   routers:
-    kickbase-web:
-      service: kickbase-web
+    kickbase:
+      service: kickbase
       rule: Host(`your.domain.de`)
       entryPoints:
         - websecure
       tls:
         certResolver: cloudflare
 
-    kickbase-api:
-      service: kickbase-api
-      rule: Host(`your.domain.de`) && PathPrefix(`/api/livepoints`)
-      entryPoints:
-        - websecure
-      tls:
-        certResolver: cloudflare
-
   services:
-    kickbase-web:
-      loadBalancer:
-        servers:
-          - url: http://<container_hostname>:3000
-
-    kickbase-api:
+    kickbase:
       loadBalancer:
         servers:
           - url: http://<container_hostname>:5000
 ```
+> [!IMPORTANT]
+In order for this to work, both your reverse proxy and the container need to be in the same network.  
 
 > [!NOTE]
 It may take some time to initially start the container, so check the logs!  
@@ -224,28 +229,60 @@ It may take some time to initially start the container, so check the logs!
 ---
 
 ## Development
-If you want to contribute to this project, you can follow the steps below to jump right into the development environment.  
-```bash
-docker run -dit --name=Kickbase -p <frontend_port>:3000 -p <backend_port>:5000 -e KB_MAIL=<kickbase_mail> -e KB_PASSWORD=<kickbase_password> -e DISCORD_WEBHOOK=<discord_webhook> -e WATCHPACK_POLLING=true -e START_DATE=<start_timestamp> ubuntu
-```  
-Run this long command to setup the container:  
-```bash
-mkdir /code && cd /code && apt update && apt upgrade -y && apt install tree nano python3 python3-pip git curl -y && git clone https://github.com/casudo/Kickbase-Insights.git . && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs && pip install --upgrade pip && pip install --upgrade -r requirements.txt && mkdir -p frontend/src/data/timestamps && mkdir logs && cd frontend && npm install
-```  
+The dashboard is a normal React app and the backend a normal Flask app, so neither needs a
+container to work on.
 
-If you have this project already cloned, you can run the following command to bind mount the files inside the container:  
 ```bash
-docker run -dit --name=Kickbase -p <frontend_port>:3000 -p <backend_port>:5000 -e KB_MAIL=<kickbase_mail> -e KB_PASSWORD=<kickbase_password> -e DISCORD_WEBHOOK=<discord_webhook> -e WATCHPACK_POLLING=true -e START_DATE=<start_timestamp> -v <your_folder>\Kickbase-Insights:/code ubuntu
-```  
-Run this long command to setup the container:  
+python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+cd frontend && npm install
+```
+
+**The backend first.** Nothing in the frontend has any data to show until a run has written
+some, and `main.py` needs real Kickbase credentials:
+
 ```bash
-cd /code && apt update && apt upgrade -y && apt install tree nano python3 python3-pip curl -y && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && apt-get install -y nodejs && pip install --upgrade pip && pip install --upgrade -r requirements.txt && mkdir -p frontend/src/data/timestamps && mkdir logs && cd frontend && npm install
-```  
+export KB_MAIL=... KB_PASSWORD=... DISCORD_WEBHOOK=... START_DATE=2026-08-01T18:00:00Z
+./venv/bin/python main.py
+```
 
-Now you're ready to go. Keep in mind that you'll first need to run `main.py` to get the required data for the frontend.  
-`python3 main.py`  
+It writes into `data/public` (what the dashboard reads) and `data/state` (what only the backend
+reads). Both are gitignored.
 
-You'll also need to manually run `npm start` in the `frontend` folder as well as `python3 -u -m flask run --host=0.0.0.0 --port=5000` in the `/code` folder.  
+**Then the two servers.** Flask serves the API:
+
+```bash
+./venv/bin/python -m flask run --port=5000
+```
+
+and, in a second shell, the React dev server with hot reload:
+
+```bash
+cd frontend && npm start
+```
+
+`npm start` serves the app on 3000 and forwards everything it cannot answer itself to Flask -
+that is the `proxy` field in `frontend/package.json`, and it is why the relative `/api/data/...`
+fetches work in development without any CORS setup. **The dev server is a development tool only.**
+In the container there is none: the image builds the bundle once and Flask serves it.
+
+To see what the container actually serves, build the frontend and let Flask hand it out:
+
+```bash
+cd frontend && npm run build     # writes frontend/build
+./venv/bin/python -m flask run --port=5000
+```
+
+**Tests.** Python is plain scripts, no framework:
+
+```bash
+for t in tests/test_*.py; do ./venv/bin/python "$t"; done
+```
+
+and the frontend uses Jest through react-scripts:
+
+```bash
+cd frontend && CI=true npx react-scripts test
+```
 
 ---
 

@@ -4,7 +4,7 @@ entrypoint.py did three things and looked at none of them:
 
   - It ran main.py with subprocess.run() and threw the result away. The exit code became
     honest in the previous step of this phase, and still nothing read it.
-  - It started the frontend and the Flask API with Popen and never touched the handles
+  - It started the long lived servers with Popen and never touched the handles
     again. Either could die at any point in the four hours between runs, and the container
     would sit there apparently fine, serving nothing.
   - It required a Discord webhook to start at all, and used it for exactly one thing:
@@ -113,17 +113,17 @@ def failed(name, error="KeyError: 'trp'"):
 
 def test_a_child_is_started_with_its_command_and_directory():
     launcher = FakeLauncher()
-    child = supervisor.Child("frontend", ["npm", "start"], cwd="/code/frontend",
+    child = supervisor.Child("flask api", ["python3", "-m", "flask", "run"], cwd="/code",
                              launcher=launcher)
     child.start()
 
-    assert launcher.started == [{"command": ["npm", "start"], "cwd": "/code/frontend"}], \
+    assert launcher.started == [{"command": ["python3", "-m", "flask", "run"], "cwd": "/code"}], \
         f"got {launcher.started}"
 
 
 def test_a_running_child_is_left_alone():
     launcher = FakeLauncher()
-    child = supervisor.Child("frontend", ["npm", "start"], launcher=launcher)
+    child = supervisor.Child("flask api", ["python3", "-m", "flask", "run"], launcher=launcher)
     child.start()
 
     assert supervisor.check_children([child], now=1000) == [], "a live child was restarted"
@@ -146,7 +146,7 @@ def test_a_dead_child_is_restarted():
 
 def test_a_child_that_was_never_started_counts_as_dead():
     launcher = FakeLauncher()
-    child = supervisor.Child("frontend", ["npm", "start"], launcher=launcher)
+    child = supervisor.Child("flask api", ["python3", "-m", "flask", "run"], launcher=launcher)
 
     assert child.is_alive() is False
     supervisor.check_children([child], now=1000)
@@ -154,9 +154,9 @@ def test_a_child_that_was_never_started_counts_as_dead():
 
 
 def test_a_crash_loop_backs_off_instead_of_spinning():
-    """A frontend that cannot start would otherwise be restarted every poll, forever."""
+    """A Flask that cannot start would otherwise be restarted every poll, forever."""
     launcher = FakeLauncher()
-    child = supervisor.Child("frontend", ["npm", "start"], launcher=launcher)
+    child = supervisor.Child("flask api", ["python3", "-m", "flask", "run"], launcher=launcher)
     child.start()
 
     now = 1000
@@ -172,7 +172,7 @@ def test_a_crash_loop_backs_off_instead_of_spinning():
 
 def test_the_backoff_lets_go_once_it_has_waited():
     launcher = FakeLauncher()
-    child = supervisor.Child("frontend", ["npm", "start"], launcher=launcher)
+    child = supervisor.Child("flask api", ["python3", "-m", "flask", "run"], launcher=launcher)
     child.start()
 
     now = 1000
@@ -186,7 +186,7 @@ def test_the_backoff_lets_go_once_it_has_waited():
 
 
 def test_the_backoff_is_capped():
-    child = supervisor.Child("frontend", ["npm", "start"], launcher=FakeLauncher())
+    child = supervisor.Child("flask api", ["python3", "-m", "flask", "run"], launcher=FakeLauncher())
     child.restarts = 50
 
     assert child.backoff_seconds() == supervisor.MAX_RESTART_DELAY_SECONDS, \
@@ -200,7 +200,7 @@ def test_a_restart_that_itself_fails_does_not_end_the_supervisor():
     def refuses_to_start(command, cwd=None):
         raise OSError("Cannot allocate memory")
 
-    child = supervisor.Child("frontend", ["npm", "start"], launcher=refuses_to_start)
+    child = supervisor.Child("flask api", ["python3", "-m", "flask", "run"], launcher=refuses_to_start)
     child.process = FakeProcess(exit_code=1)
 
     restarted = supervisor.check_children([child], now=1000)
@@ -213,7 +213,7 @@ def test_a_failed_restart_still_backs_off():
     def refuses_to_start(command, cwd=None):
         raise OSError("Cannot allocate memory")
 
-    child = supervisor.Child("frontend", ["npm", "start"], launcher=refuses_to_start)
+    child = supervisor.Child("flask api", ["python3", "-m", "flask", "run"], launcher=refuses_to_start)
     child.process = FakeProcess(exit_code=1)
 
     supervisor.check_children([child], now=1000)
@@ -224,7 +224,7 @@ def test_a_failed_restart_still_backs_off():
 
 def test_only_the_first_restarts_are_worth_a_message():
     """A child that dies every five minutes has already been reported."""
-    child = supervisor.Child("frontend", ["npm", "start"], launcher=FakeLauncher())
+    child = supervisor.Child("flask api", ["python3", "-m", "flask", "run"], launcher=FakeLauncher())
 
     alerted = []
     for attempt in range(1, 26):
@@ -692,14 +692,48 @@ def test_importing_the_entrypoint_starts_nothing():
     assert callable(entrypoint.build_children)
 
 
-def test_the_children_are_the_two_processes_the_container_serves_from():
+def test_the_child_is_the_one_process_the_container_serves_from():
+    """It used to be two: a create-react-app dev server on 3000 with the data compiled into
+    the bundle, and Flask on 5000. Flask serves the prebuilt frontend as well now."""
     import entrypoint
 
     children = entrypoint.build_children()
 
-    assert [c.name for c in children] == ["frontend", "flask api"], \
-        f"got {[c.name for c in children]}"
+    assert [c.name for c in children] == ["flask api"], f"got {[c.name for c in children]}"
     assert all(c.process is None for c in children), "building must not start them"
+
+
+def test_the_flask_port_is_configurable():
+    """The healthcheck in the Dockerfile reads the same variable, so the two cannot disagree
+    about which port to ask."""
+    import entrypoint
+
+    from os import environ
+
+    original = environ.get("FLASK_PORT")
+    environ["FLASK_PORT"] = "8080"
+
+    try:
+        assert "--port=8080" in entrypoint.build_children()[0].command
+    finally:
+        if original is None:
+            del environ["FLASK_PORT"]
+        else:
+            environ["FLASK_PORT"] = original
+
+
+def test_nothing_in_the_entrypoint_runs_npm():
+    """npm install on every start and a dev server in production were both consequences of the
+    data being compiled into the bundle. It is fetched now."""
+    source = (path.join(path.dirname(path.dirname(path.abspath(__file__))), "entrypoint.py"))
+
+    with open(source, "r") as f:
+        text = f.read()
+
+    ### The quoted form is how it would be invoked; the prose around it is allowed to keep
+    ### saying what used to happen here.
+    assert '"npm"' not in text, "the entrypoint must not reach for npm any more"
+    assert "sleep(120)" not in text, "the two startup sleeps waited for servers nobody polled"
 
 
 ### ===============================================================================
@@ -758,7 +792,9 @@ if __name__ == "__main__":
     check("a failed run without a manifest is still reported", test_a_failed_run_without_a_manifest_is_still_reported)
     check("entrypoint and health agree on the schedule", test_the_entrypoint_and_the_health_check_agree_on_the_schedule)
     check("importing the entrypoint starts nothing", test_importing_the_entrypoint_starts_nothing)
-    check("the children are the two served processes", test_the_children_are_the_two_processes_the_container_serves_from)
+    check("the child is the one served process", test_the_child_is_the_one_process_the_container_serves_from)
+    check("the flask port is configurable", test_the_flask_port_is_configurable)
+    check("nothing in the entrypoint runs npm", test_nothing_in_the_entrypoint_runs_npm)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")

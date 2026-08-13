@@ -1,20 +1,24 @@
 import json
 import subprocess
 
-from os import getenv, chdir, path
+from os import getenv, path
 from time import sleep, time
 from croniter import croniter
 from datetime import datetime
 
-from backend import exceptions, health, miscellaneous, supervisor
+from backend import exceptions, health, miscellaneous, state_migration, supervisor
 from backend.paths import TIMESTAMP_DIR
 
 ### ===============================================================================
 
-### How often to look at the frontend and API processes while waiting for the next run.
-### They used to be started and never looked at again, so either could die at any point
-### in the four hours between runs and the container would sit there apparently fine.
+### How often to look at the Flask process while waiting for the next run. It used to be
+### started and never looked at again, so it could die at any point in the four hours
+### between runs and the container would sit there apparently fine.
 POLL_INTERVAL_SECONDS = 15
+
+### The one port the container serves from. Flask hands out the API and the prebuilt frontend,
+### so the 3000/5000 split is gone along with the create-react-app dev server that needed it.
+DEFAULT_FLASK_PORT = "5000"
 
 ### The same default backend/health.py uses for the staleness check, so the schedule and
 ### the threshold derived from it cannot disagree.
@@ -153,22 +157,26 @@ def check_environment():
 
 
 def build_children():
-    """### The long lived processes the container serves from.
+    """### The long lived process the container serves from.
 
-    They used to be started with Popen and never looked at again: either could die at any
-    point in the four hours between runs, and the container would keep sitting there
-    apparently fine, serving nothing.
+    One, not two. There used to be a create-react-app dev server here as well, serving a
+    bundle with the data compiled into it - which is why the container ran `npm install` on
+    every start, slept two minutes twice waiting for two servers, and published two ports.
+    Flask serves the prebuilt frontend and the API from the same port now.
+
+    The supervision itself is unchanged: whatever is in this list gets polled and restarted.
 
     Args:
         None
 
     Returns:
-        list: The frontend and the Flask API, not started yet.
+        list: The Flask API, not started yet.
     """
+    port = getenv("FLASK_PORT", DEFAULT_FLASK_PORT)
+
     return [
-        supervisor.Child("frontend", ["npm", "start"], cwd="/code/frontend"),
         supervisor.Child("flask api",
-                         ["python3", "-u", "-m", "flask", "run", "--host=0.0.0.0", "--port=5000"],
+                         ["python3", "-u", "-m", "flask", "run", "--host=0.0.0.0", f"--port={port}"],
                          cwd="/code"),
     ]
 
@@ -238,31 +246,28 @@ if __name__ == "__main__":
     ### not turn into six identical messages a day
     run_reporter = supervisor.RunReporter(settings["discord_webhook"])
 
-    # print("\nDEBUG ep.py: Running main")
+    ### Move what an older version wrote in frontend/src/data into data/public and data/state,
+    ### once. Both children do this too, since either can be started on its own - but doing it
+    ### here first means they never race each other over the same files.
+    moved = state_migration.migrate_legacy_layout()
+
+    if moved:
+        print(f"  📦 {moved} Datei(en) aus frontend/src/data nach data/ verschoben.")
+
+    ### Flask first, so the dashboard answers while the first run is still walking the
+    ### competition. It used to come up last, four minutes and one npm install after the
+    ### container started.
+    supervised = build_children()
+
+    for child in supervised:
+        child.start()
+
     print("\n  🚀 Running main.py...\n\n")
     run_scraper(run_reporter)
 
-    # print("\nDEBUG ep.py: Changing directiry")
-    chdir("/code/frontend")
-    # print("\nDEBUG ep.py: npm install")
-    subprocess.run(["npm", "install"])
-    # subprocess.run(["npm", "install", "jest"])
-
-    supervised = build_children()
-
-    # print("\nDEBUG ep.py: npm start")
-    supervised[0].start()
-
-    ### Sleep here to give the frontend time to start
-    sleep(120)
-
-    # print("\nDEBUG ep.py: Changing directiry")
-    chdir("/code/")
-    # print("\nDEBUG ep.py: Starting flask api")
-    supervised[1].start()
-
-    ### Sleep here to give the flask server time to start
-    sleep(120)
-
+    ### No sleeps here any more. They existed to give a create-react-app dev server and then
+    ### Flask time to come up before anything looked at them - and nothing did look at them,
+    ### which is what the supervisor loop below was built for. It polls every few seconds and
+    ### restarts what died, so waiting a fixed four minutes bought nothing but four minutes.
     supervise(supervised, run_reporter, settings["run_schedule"],
               settings["discord_webhook"])

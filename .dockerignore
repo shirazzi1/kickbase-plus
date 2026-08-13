@@ -16,11 +16,12 @@ repo_pictures/
 
 ### Ignore auto generated files
 frontend/node_modules/
-### The whole data directory, not just the JSON files directly in it. The old pattern
-### "frontend/src/data/timestamps/*." ended in a dot and therefore matched nothing, so
-### every timestamp file from the build machine was baked into the published image.
-### main.py runs before "npm install"/"npm start" in entrypoint.py and recreates the
-### directory, so nothing in the image needs it.
+### The build stage runs "npm ci" against package-lock.json, so a build machine's copy would
+### only be copied in and then replaced.
+frontend/build/
+### The old data directory. Nothing writes here any more - the datasets live in data/public
+### and data/state - but a checkout that has run an older version still has it, and baking a
+### build machine's league into the published image is exactly what this line prevented before.
 frontend/src/data/
 logs/
 ### Runtime state: the previous-good snapshots and the append-only history store. Baking a
