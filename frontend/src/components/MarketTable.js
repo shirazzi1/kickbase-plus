@@ -70,6 +70,11 @@ function MarketTable() {
         return Boolean(reference) && price >= 2 * reference
     }
 
+    // Shown whenever the failure did not come from our own Flask API - a thrown fetch, or
+    // a non-OK response with no parseable JSON "error" (the dev-server proxy answers a
+    // plain-text 500 when Flask is not running at all, which is the common local setup)
+    const apiUnreachable = "Die Flask-API ist nicht erreichbar. Läuft app.py?"
+
     const send = async (playerId, price) => {
         setPendingId(playerId)
         setConfirming(null)
@@ -83,19 +88,28 @@ function MarketTable() {
             const body = await response.json().catch(() => ({}))
 
             if (!response.ok) {
-                setError(body.error || `Kickbase antwortete mit HTTP ${response.status}.`)
+                // Our own endpoints always answer a failure as JSON carrying "error" - a
+                // finished German sentence, shown verbatim. Anything else (no body.error)
+                // did not come from Flask at all, so it gets the same message as a thrown
+                // fetch rather than a raw HTTP status nobody asked for.
+                setError(body.error || apiUnreachable)
                 return
             }
 
             // What Kickbase confirmed, not what was typed
             setBids((current) => ({ ...current, [playerId]: body.ownBid }))
-            closeEdit()
+            // Scoped to this row: a response for A must never discard a draft the user has
+            // since started on B. Without this check, a late A closing the shared `edit`
+            // state would silently wipe out whatever the user is now typing on B.
+            setEdit((current) => current?.playerId === playerId ? null : current)
         } catch (e) {
             // A network failure rather than an HTTP status: naming the cause beats
             // "Gebot fehlgeschlagen", which would send you looking at Kickbase
-            setError("Die Flask-API ist nicht erreichbar. Läuft app.py?")
+            setError(apiUnreachable)
         } finally {
-            setPendingId(null)
+            // Same scoping as above, so a late response for A cannot clear a pending
+            // indicator that by now belongs to a different row
+            setPendingId((current) => current === playerId ? null : current)
         }
     }
 
@@ -237,11 +251,19 @@ function MarketTable() {
                     editing={edit?.playerId === params.row.playerId}
                     draft={edit?.playerId === params.row.playerId ? edit.draft : ""}
                     pending={pendingId === params.row.playerId}
-                    onEdit={() => setEdit({
-                        playerId: params.row.playerId,
-                        // The running bid if there is one, else the suggestion, else empty
-                        draft: String(params.row.ownBid ?? params.row.suggestedBid ?? "")
-                    })}
+                    onEdit={() => {
+                        // One bid in flight at a time: starting a different edit while a
+                        // request is pending is what let a late response for row A land on
+                        // whatever row B had become in the meantime
+                        if (pendingId !== null)
+                            return
+
+                        setEdit({
+                            playerId: params.row.playerId,
+                            // The running bid if there is one, else the suggestion, else empty
+                            draft: String(params.row.ownBid ?? params.row.suggestedBid ?? "")
+                        })
+                    }}
                     onDraftChange={(draft) => setEdit((current) => ({ ...current, draft }))}
                     onSubmit={() => submit(params.row)}
                     onWithdraw={() => send(params.row.playerId, null)}
