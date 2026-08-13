@@ -20,6 +20,7 @@ import CloseIcon from "@mui/icons-material/Close"
 // import Button from "@mui/material/Button";
 
 // Import custom components from the project
+import Tagesplan from "./components/Tagesplan"
 import MarketTable from "./components/MarketTable"
 import TurnoversTable from "./components/TurnoversTable"
 import TakenPlayersTable from "./components/TakenPlayersTable"
@@ -76,7 +77,9 @@ const lightTheme = createTheme({ palette: { mode: "light" } })
 // Main App component
 function App() {
   // State variables
-  const [selectedTab, setSelectedTab] = useState("1")
+  // The Tagesplan opens first: it is the only tab that says what changed since you last
+  // looked, which is the question the rest of the tabs are opened to answer by hand.
+  const [selectedTab, setSelectedTab] = useState("0")
   const [darkModeEnabled, setDarkModeEnabled] = useState(false)
   const [disclaimerVisible, setDisclaimerVisible] = useState(true);
   // const [refreshing, setRefreshing] = useState(false); // State to manage refreshing
@@ -164,6 +167,7 @@ function App() {
             <Grid item>
               {/* TabList contains the tabs for navigation */}
               <TabList onChange={(e, v) => setSelectedTab(v)}>
+                <Tab label="Tagesplan" value="0" />
                 <Tab label="Transfers" value="1" />
                 <Tab label="Transfererlöse" value="2" />
                 <Tab label="Spieler" value="3" />
@@ -181,6 +185,16 @@ function App() {
           </Grid>
 
           {/* TabPanel contains the content for each tab */}
+          <TabPanel sx={{ padding: 0 }} value="0">
+
+            {/* What changed since the last runs. Everything else in this app shows a state;
+                this shows the difference between two of them. */}
+            <Paper sx={{ marginTop: "25px" }} elevation={5}>
+              <Typography variant="h4" sx={{ padding: "15px" }}>Tagesplan <HelpIcon text="Was sich in den letzten 48 Stunden geändert hat, aus dem Vergleich aufeinanderfolgender Läufe: neue Listungen, Preissenkungen, Marktwertsprünge, ablaufende Kickbase-Angebote und Manager, denen der Spielraum ausgeht. Die Kennzeichnung sagt, wie dringend es ist - 'Jetzt' heißt, dass Warten bis zum nächsten Blick wahrscheinlich zu spät ist. Ein Ablaufdatum liefert Kickbase nur für seine eigenen Angebote, deshalb tauchen von Managern gelistete Spieler hier nie als 'Läuft ab' auf."/></Typography>
+              <Tagesplan />
+            </Paper>
+          </TabPanel>
+
           <TabPanel sx={{ padding: 0 }} value="1">
             
             {/* "Transfers" related components */}
