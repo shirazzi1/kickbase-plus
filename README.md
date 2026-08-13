@@ -105,6 +105,7 @@ docker run -d \
 ```  
 `<start_timestamp>` is an ISO 8601 timestamp in UTC, e.g. `2026-08-01T18:00:00Z`.  
 `<bid_token>` is any long random string of your choosing; the container exits on startup without it.  
+The backend port `5000` is configurable via the `FLASK_PORT` environment variable (e.g. `-e FLASK_PORT=<flask_port>`) and defaults to `5000` if unset. On macOS, the AirPlay Receiver occupies port `5000` by default, which stops Flask from binding to it - set `FLASK_PORT` to something else in that case.  
 
 ### Docker Compose
 ```yaml
@@ -125,6 +126,7 @@ services:
       - START_DATE=<start_timestamp> # ISO 8601 in UTC, e.g. 2026-08-01T18:00:00Z
       - BID_TOKEN=<bid_token> # any long random string; container exits on startup without it
 ```  
+The backend port `5000` above is configurable via the `FLASK_PORT` environment variable and defaults to `5000` if unset. On macOS, the AirPlay Receiver occupies port `5000` by default, which stops Flask from binding to it - set `FLASK_PORT` to something else in that case.  
 
 ---
 
@@ -199,6 +201,7 @@ Now you're ready to go. Keep in mind that you'll first need to run `main.py` to 
 `python3 main.py`  
 
 You'll also need to manually run `npm start` in the `frontend` folder as well as `python3 -u -m flask run --host=0.0.0.0 --port=5000` in the `/code` folder.  
+The port `5000` here is configurable via the `FLASK_PORT` environment variable and defaults to `5000` if unset - pass it as `--port=$FLASK_PORT` instead if you set one. On macOS, the AirPlay Receiver occupies port `5000` by default, which stops Flask from binding to it - set `FLASK_PORT` to something else in that case.  
 
 ---
 

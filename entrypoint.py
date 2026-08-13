@@ -32,6 +32,7 @@ RUN_SCHEDULE = getenv("RUN_SCHEDULE", "10 2,6,10,14,18,22 * * *")
 START_DATE = getenv("START_DATE")
 START_MONEY = getenv("START_MONEY", "50000000")
 BID_TOKEN = getenv("BID_TOKEN")
+FLASK_PORT = getenv("FLASK_PORT", "5000")
 
 ### Display a welcoming message in Docker logs
 print("👍 Container started. Welcome!")
@@ -72,6 +73,15 @@ if RUN_SCHEDULE == "10 2,6,10,14,18,22 * * *":
     print("  ✅ Using default value for RUN_SCHEDULE:", RUN_SCHEDULE)
 else:
     print("  ⚠️ RUN_SCHEDULE has been set to a custom value:", RUN_SCHEDULE)
+
+### Check if FLASK_PORT is using the default value
+### On macOS the AirPlay Receiver occupies port 5000 by default, so Flask cannot bind
+### there unless this is changed - see frontend/src/setupProxy.js for the matching
+### change on the frontend side.
+if FLASK_PORT == "5000":
+    print("  ✅ Using default value for FLASK_PORT:", FLASK_PORT)
+else:
+    print("  ⚠️ FLASK_PORT has been set to a custom value:", FLASK_PORT)
 
 ### Check if START_DATE is set by user.
 ### Uses the same parser as main.py so both agree on what a valid value is.
@@ -123,7 +133,7 @@ sleep(120)
 # print("\nDEBUG ep.py: Changing directiry")
 chdir("/code/")
 # print("\nDEBUG ep.py: Starting flask api")
-flask_api = subprocess.Popen(["python3", "-u", "-m", "flask", "run", "--host=0.0.0.0", "--port=5000"])
+flask_api = subprocess.Popen(["python3", "-u", "-m", "flask", "run", "--host=0.0.0.0", f"--port={FLASK_PORT}"])
 
 ### Sleep here to give the flask server time to start
 sleep(120)
