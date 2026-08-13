@@ -191,6 +191,16 @@ USER_LISTED = {
     "u": {"i": OWN_USER_ID, "n": "shirazzi", "uim": "user/91fd.jpe", "isvf": False, "st": 0},
 }
 
+### Kai Havertz, listed by a different league member - neither Kickbase nor us.
+### Without this fixture, "isOwnListing" is only ever exercised against userId is
+### None (Kickbase) or userId == OWN_USER_ID (ours), so a bug that flags every
+### league member's listing as our own would go unnoticed.
+OTHER_MANAGER_LISTED = {
+    "i": "223", "fn": "Kai", "n": "Havertz", "tid": "3", "pos": 3, "st": 0,
+    "mvt": 1, "mv": 41000000, "prc": 45000000, "ofc": 0,
+    "u": {"i": OTHER_USER_ID, "n": "Meier", "uim": "user/ab12.jpe", "isvf": False, "st": 0},
+}
+
 
 def test_own_bid_read_from_the_offers_list():
     player = Market_Players(OWN_BID_VIA_OFS)
@@ -273,7 +283,8 @@ def run_market():
     import main
     from backend.kickbase.v4 import leagues
 
-    market_items = [USER_LISTED, NO_BID, OWN_BID_VIA_OFS, OWN_BID_VIA_TOP_LEVEL, FOREIGN_BID]
+    market_items = [USER_LISTED, NO_BID, OWN_BID_VIA_OFS, OWN_BID_VIA_TOP_LEVEL, FOREIGN_BID,
+                    OTHER_MANAGER_LISTED]
 
     ### Only the injured player carries a note, and the API leaves the trailing newline in
     stats_by_id = {
@@ -316,7 +327,7 @@ def run_market():
 
 def test_one_file_holds_both_listing_sources():
     rows = run_market()
-    assert len(rows) == 5, f"expected all 5 market players in one file, got {sorted(rows)}"
+    assert len(rows) == 6, f"expected all 6 market players in one file, got {sorted(rows)}"
     assert "Ginter" in rows, "the user listing is missing"
     assert "Gouweleeuw" in rows, "the Kickbase listing is missing"
 
@@ -425,7 +436,11 @@ def test_own_listing_is_flagged():
 
 def test_foreign_and_kickbase_listings_are_not_flagged():
     rows = run_market()
-    assert rows["Musah"]["isOwnListing"] is False, "expected a foreign listing unflagged"
+    assert rows["Musah"]["isOwnListing"] is False, "expected a Kickbase listing unflagged"
+    ### Havertz is listed by a different league member - the case a check that only
+    ### looks at "userId is not None" would wrongly flag as ours
+    assert rows["Havertz"]["isOwnListing"] is False, \
+        "expected another manager's listing unflagged"
     for name, row in rows.items():
         if row["isFreeAgent"]:
             assert row["isOwnListing"] is False, \
