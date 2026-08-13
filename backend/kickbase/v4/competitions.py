@@ -4,13 +4,12 @@
 TODO: Maybe list all functions here automatically?
 """
 
-import requests
 import logging
-import json
 
 from concurrent.futures import ThreadPoolExecutor
 
-from backend import miscellaneous
+from backend import exceptions, miscellaneous
+from backend.kickbase import http
 
 ### -------------------------------------------------------------------
 
@@ -31,11 +30,6 @@ def get_team_overview(token: str) -> dict:
     logging.info("Getting team overview...")
 
     url = "https://api.kickbase.com/v4/competitions/1/teams/{team_id}/teamprofile"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     ### There is no endpoint listing the teams of a competition, so the ids are probed.
     ### Team IDs 33 and 38 are skipped cuz they are leading to "500 Internal Server Error"
@@ -43,22 +37,24 @@ def get_team_overview(token: str) -> dict:
 
     def fetch_team(team_id):
         """Probe one team id. Returns the team info, or None if there is no such team."""
+        ### Most of these ids do not exist, so a failure here is the expected answer and
+        ### not worth a retry with backoff - 95 of them would turn a probe that takes
+        ### seconds into one that takes minutes.
         try:
-            response = requests.get(url.format(team_id=team_id), headers=headers)
-            response.raise_for_status()  # Raise an HTTPError for bad responses (4xx and 5xx)
-            if not response.content:  # Check if the response is not empty
-                logging.warning(f"Empty response for team id {team_id}")
-                return None
-            json_response = response.json()
-        except requests.exceptions.RequestException as e:
-            logging.debug(f"Failed to get team id {team_id}: {e}")
-            return None
-        except json.JSONDecodeError as e:
+            json_response = http.get_json(url.format(team_id=team_id), token, retry=False)
+        except exceptions.ApiResponseException as e:
             logging.warning(f"Failed to decode JSON for team id {team_id}: {e}")
+            return None
+        except exceptions.AuthExpiredException:
+            ### Not a missing team: the token is gone and every further probe would fail
+            ### the same way. Let it out.
+            raise
+        except exceptions.HttpException as e:
+            logging.debug(f"Failed to get team id {team_id}: {e}")
             return None
 
         ### Check if team has players
-        if not json_response["it"]:
+        if not json_response.get("it"):
             return None
 
         ### Get team id, name, and players
@@ -95,20 +91,14 @@ def match_days(token: str, competition_id: int = 1) -> tuple:
         tuple: A tuple containing the current match day number and a list of dictionaries. Each dictionary contains the match day number, the start date & time of the first match, and the start date & time of the last match.
     """
     url = f"https://api.kickbase.com/v4/competitions/{competition_id}/matchdays"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     match_days = []
 
     logging.info("Fetching match days...")
 
-    try:
-        response = requests.get(url, headers=headers).json()
-    except requests.exceptions.RequestException as e:
-        logging.error(f"Request failed: {e}")
+    ### A failure here used to be logged and then walked straight past, into a NameError
+    ### on the next line because "response" was never assigned. It travels on now.
+    response = http.get_json(url, token)
 
     current_match_day = response["day"]
 

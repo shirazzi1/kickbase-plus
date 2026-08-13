@@ -14,9 +14,8 @@ from os import path
 
 sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
 
-import requests as real_requests
-
 from backend import miscellaneous
+from backend.kickbase import http
 from backend.kickbase.v4 import competitions
 
 ### ===============================================================================
@@ -50,24 +49,17 @@ REAL_TEAMS = {2: "Bayern", 3: "Dortmund", 7: "Leverkusen", 40: "Union"}
 
 
 class FakeResponse:
-    def __init__(self, payload, content=b"x"):
+    def __init__(self, payload, status_code=200):
         self._payload = payload
-        self.content = content
+        self.status_code = status_code
+        self.headers = {}
 
     def json(self):
         return self._payload
 
-    def raise_for_status(self):
-        pass
-
-
-class MissingTeam(FakeResponse):
-    def raise_for_status(self):
-        raise real_requests.exceptions.HTTPError("404")
-
 
 class FakeApi:
-    exceptions = real_requests.exceptions
+    """Stands in for the pooled session and answers the team probe."""
 
     def __init__(self, delay=0):
         self.urls = []
@@ -87,16 +79,18 @@ class FakeApi:
                 "tn": REAL_TEAMS[team_id],
                 "it": [{"i": f"p{team_id}", "n": "Player"}],
             })
-        return MissingTeam({})
+
+        ### A team id that does not exist. The probe reads the 404 as "no such team",
+        ### which is the one HTTP error this project treats as an answer.
+        return FakeResponse({}, status_code=404)
 
 
 def with_api(api, fn):
-    original = competitions.requests
-    competitions.requests = api
+    http.reset_session(api)
     try:
         return fn()
     finally:
-        competitions.requests = original
+        http.reset_session()
 
 
 ### ===============================================================================

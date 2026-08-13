@@ -14,6 +14,7 @@ from os import path
 
 sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
 
+from backend.kickbase import http
 from backend.kickbase.v4 import leagues
 
 ### ===============================================================================
@@ -43,13 +44,14 @@ class FakeResponse:
     def __init__(self, payload, status_code=200):
         self._payload = payload
         self.status_code = status_code
+        self.headers = {}
 
     def json(self):
         return self._payload
 
 
-class CountingRequests:
-    """Stands in for the requests module and records every GET."""
+class CountingSession:
+    """Stands in for the pooled HTTP session and records every GET."""
 
     def __init__(self, payloads):
         self.payloads = payloads
@@ -64,9 +66,9 @@ class CountingRequests:
 
 
 def use_fake(payloads):
-    """Swap the requests module inside the leagues module."""
-    fake = CountingRequests(payloads)
-    leagues.requests = fake
+    """Swap the pooled session every Kickbase call now goes through."""
+    fake = CountingSession(payloads)
+    http.reset_session(fake)
     return fake
 
 

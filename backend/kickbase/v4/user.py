@@ -4,12 +4,30 @@
 TODO: Maybe list all functions here automatically?
 """
 
-import requests
+import logging
 
 from backend import exceptions, miscellaneous
+from backend.kickbase import http
 from backend.kickbase.endpoints.user import User
 
 ### -------------------------------------------------------------------
+
+
+def _announce_login_failure(reason: str, discord_webhook: str) -> None:
+    """### Try to tell Discord that the login failed, without hiding why it failed.
+
+    The notification runs inside the handler for the login error. If it raised, the
+    Discord problem would replace the Kickbase one on its way up and the log would name
+    the wrong subsystem - the exact confusion this whole layer exists to end.
+
+    Args:
+        reason (str): What to tell the user.
+        discord_webhook (str): The webhook URL.
+    """
+    try:
+        miscellaneous.discord_notification("Login failed!", reason, 16711680, discord_webhook)
+    except exceptions.NotificatonException as e:
+        logging.error(f"Could not announce the failed login on Discord either: {e}")
 
 
 def login(email: str, password: str, discord_webhook: str) -> tuple:
@@ -27,10 +45,6 @@ def login(email: str, password: str, discord_webhook: str) -> tuple:
         tuple: A tuple containing the user info and token.
     """
     url = "https://api.kickbase.com/v4/user/login"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json"
-    }
     payload = {
         "em": email,
         "pass": password,
@@ -39,13 +53,20 @@ def login(email: str, password: str, discord_webhook: str) -> tuple:
         "rep": {} # TODO: What is this?
     }
 
-    ### Try to login with the given credentials via POST request
+    ### Try to login with the given credentials via POST request.
+    ### The old bare except reported every failure as wrong credentials, so a Kickbase
+    ### outage read as "your password is wrong" - and sent that to Discord. Only a
+    ### rejected login says anything about the credentials; everything else says what it
+    ### actually was.
     try:
-        json_response = requests.post(url, json=payload, headers=headers).json() # Save response as json
-    except:
-        miscellaneous.discord_notification("Login failed!", "Please check your credentials.", 16711680, discord_webhook)
-        raise exceptions.LoginException("[CRITICAL] Login failed! Please check your credentials.")
-    
+        json_response = http.post_json(url, payload)
+    except exceptions.AuthExpiredException as e:
+        _announce_login_failure("Please check your credentials.", discord_webhook)
+        raise exceptions.LoginException("[CRITICAL] Login failed! Please check your credentials.") from e
+    except exceptions.HttpException as e:
+        _announce_login_failure(f"Kickbase could not be reached: {e}", discord_webhook)
+        raise exceptions.LoginException(f"[CRITICAL] Login failed! {e}") from e
+
     ### Create an object "user" with the User class with json_response["u"] as parameter (dict)
     user = User(json_response["u"])
     ### Save the token
@@ -65,16 +86,6 @@ def collect_gift(token: str) -> dict:
         dict: The response of the API call.
     """
     url = "https://api.kickbase.com/v4/bonus/collect"
-    headers = {
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "Cookie": f"kkstrauth={token};",
-    }
 
     ### Send GET request to get the current gift
-    try:
-        json_response = requests.get(url, headers=headers).json()
-    except:
-        raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") # TODO: Change exception
-    
-    return json_response
+    return http.get_json(url, token)

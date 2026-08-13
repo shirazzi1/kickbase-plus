@@ -20,6 +20,7 @@ from os import environ, makedirs, path
 sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
 
 from backend import miscellaneous
+from backend.kickbase import http
 from backend.kickbase.v4 import competitions, leagues
 
 ### ===============================================================================
@@ -56,6 +57,7 @@ class FakeResponse:
     def __init__(self, payload, status_code=200):
         self._payload = payload
         self.status_code = status_code
+        self.headers = {}
 
     def json(self):
         return self._payload
@@ -107,8 +109,8 @@ def test_a_missing_start_date_falls_back_to_the_full_year():
 
 
 def use_fake(handler):
-    """Swap the requests module inside the leagues module and reset the caches."""
-    class FakeRequests:
+    """Swap the pooled HTTP session and reset the caches."""
+    class FakeSession:
         def __init__(self):
             self.urls = []
 
@@ -116,8 +118,8 @@ def use_fake(handler):
             self.urls.append(url)
             return handler(url)
 
-    fake = FakeRequests()
-    leagues.requests = fake
+    fake = FakeSession()
+    http.reset_session(fake)
     leagues.clear_caches()
     return fake
 
@@ -192,6 +194,34 @@ def test_a_history_that_cannot_be_read_at_all_raises():
         raise AssertionError("expected a KickbaseException")
     finally:
         leagues.clear_caches()
+        http.reset_session()
+
+
+def test_a_server_error_is_not_read_as_an_unserved_window():
+    """Only a rejected request means "this window is not served".
+
+    A 5xx says the API is unwell, and it has already been retried three times by then.
+    Widening the window in response would spend a second request on the same outage and
+    then hide it behind a fallback that cannot work either.
+    """
+    from backend import exceptions
+
+    set_start_date(START)
+    fake = use_fake(lambda url: FakeResponse({}, status_code=500))
+
+    try:
+        leagues.player_marketvalue("token", "755")
+    except exceptions.ApiUnavailableException:
+        pass
+    except Exception as e:
+        raise AssertionError(f"expected ApiUnavailableException, got {type(e).__name__}: {e}")
+    else:
+        raise AssertionError("expected ApiUnavailableException")
+    finally:
+        leagues.clear_caches()
+        http.reset_session()
+
+    assert len(fake.urls) == 1, f"the 365 day fallback must not be tried here: {fake.urls}"
 
 
 ### ===============================================================================
@@ -310,6 +340,7 @@ if __name__ == "__main__":
     check("a rejected window falls back to a year", test_a_window_kickbase_rejects_falls_back_to_a_year)
     check("the fallback is remembered for the run", test_the_fallback_is_remembered_for_the_rest_of_the_run)
     check("an unreadable history raises", test_a_history_that_cannot_be_read_at_all_raises)
+    check("a server error is not an unserved window", test_a_server_error_is_not_read_as_an_unserved_window)
 
     print("\nteam_value_per_match_day()")
     check("one ranking request per played match day", test_one_ranking_request_per_played_match_day)
