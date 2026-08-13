@@ -23,3 +23,5 @@ frontend/node_modules/
 ### directory, so nothing in the image needs it.
 frontend/src/data/
 logs/
+### Snapshots of the previous good data files, written at runtime
+data/

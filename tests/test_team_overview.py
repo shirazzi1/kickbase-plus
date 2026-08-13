@@ -26,9 +26,13 @@ PASSED = []
 def check(name, fn):
     ### Writes go to a temporary directory, never the real data directory
     with tempfile.TemporaryDirectory() as tmp:
-        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR)
+        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+                    miscellaneous.LAST_GOOD_DIR)
         miscellaneous.DATA_DIR = tmp
         miscellaneous.TIMESTAMP_DIR = path.join(tmp, "timestamps")
+        ### Every write snapshots the file it replaces; without this the snapshots land
+        ### in the repository's own data directory
+        miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
         try:
             fn()
         except AssertionError as e:
@@ -41,7 +45,8 @@ def check(name, fn):
             print(f"  ok    {name}")
             PASSED.append(True)
         finally:
-            miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR = original
+            (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+             miscellaneous.LAST_GOOD_DIR) = original
 
 
 ### Team ids that "exist" in the fake competition

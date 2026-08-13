@@ -309,10 +309,12 @@ def run_team_values(users, played_match_days, total_match_days, absent_from_rank
             json.dump(users, f)
 
         original = (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+                    miscellaneous.LAST_GOOD_DIR,
                     leagues.ranking, competitions.match_days)
         main.DATA_DIR = data_dir
         miscellaneous.DATA_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
+        miscellaneous.LAST_GOOD_DIR = path.join(tmp, "last-good")
 
         try:
             leagues.ranking = fake_ranking
@@ -328,6 +330,7 @@ def run_team_values(users, played_match_days, total_match_days, absent_from_rank
                 return json.load(f), calls
         finally:
             (main.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+             miscellaneous.LAST_GOOD_DIR,
              leagues.ranking, competitions.match_days) = original
 
 
