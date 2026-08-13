@@ -23,6 +23,10 @@ jest.mock("./data/timestamps/ts_turnovers.json", () => ({
     time: "2026-08-13T05:01:02", runId: "20260813T050102Z-1a2b", rows: 42
 }))
 
+// The Tagesplan tab reads events.json, which the scraper only writes from its first run on.
+// Mocked virtually so this suite does not need a file that a fresh checkout cannot have.
+jest.mock("./data/events.json", () => ([]), { virtual: true })
+
 const App = require("./App").default
 
 describe("App", () => {

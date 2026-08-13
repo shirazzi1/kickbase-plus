@@ -53,3 +53,12 @@ MARKET_VALUE_CACHE_DIR = path.join(BASE_PATH, "data", "market-values")
 ### have to find them by probing 97 ids to discover 18. One file per competition, refreshed
 ### on a daily clock. See backend/kickbase/v4/competitions.py.
 TEAM_CACHE_DIR = path.join(BASE_PATH, "data", "teams")
+
+### Which events the diff engine has already announced on Discord (see backend/events.py).
+###
+### The events themselves are rebuilt from the history store on every run, so this file is
+### the only thing that knows an alert has been sent - without it the same "Preis gesenkt"
+### message goes out six times a day. Which is why it sits in the same "data" parent as the
+### history store and the .last-good snapshots: one volume mount, and everything that has to
+### survive an image pull survives it.
+EVENTS_STATE_PATH = path.join(BASE_PATH, "data", "events-state.json")
