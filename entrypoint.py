@@ -72,6 +72,16 @@ except exceptions.KickbaseException as e:
     print(f"  ❌ {e} Exiting...")
     exit()
 
+### Check the break-even horizons. Same parser as main.py, so both agree on what a valid
+### value is.
+try:
+    bep_growth_days, bep_target_days = miscellaneous.get_bep_days()
+    print(f"  ✅ Break-even horizons: {bep_growth_days} day growth average, "
+          f"{bep_target_days} day payback.")
+except exceptions.KickbaseException as e:
+    print(f"  ❌ {e} Exiting...")
+    exit()
+
 ### Check if START_MONEY is set
 if START_MONEY == "50000000":
     formatted_money = f"{int(START_MONEY):,}".replace(",", ".") + "€"

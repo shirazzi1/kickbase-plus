@@ -40,6 +40,16 @@ PLAYER_IMAGE_BASE_URL = "https://kickbase.b-cdn.net/"
 LOGIN_BONUS_STEP = 10_000
 LOGIN_BONUS_CAP = 100_000
 
+### The break-even horizons, and their defaults. Both defaults reproduce the numbers the
+### frontend produced when it averaged today, yesterday and vorgestern itself: the daily
+### deltas telescope, so their mean over three days is exactly the three-day average.
+DEFAULT_BEP_GROWTH_DAYS = 3
+DEFAULT_BEP_TARGET_DAYS = 3
+
+### The market value history covers 365 days, so a window of 365 can never be filled -
+### it needs days + 1 entries to measure a difference across.
+MAX_BEP_GROWTH_DAYS = 364
+
 ### Achievement rewards, from help.kickbase.com/help/erfolge.
 ###
 ### Not in here on purpose: the league size achievements (600 Kreisliga, 601 Regionalliga,
@@ -347,6 +357,60 @@ def get_start_datetime() -> datetime:
         )
 
     return parsed.astimezone(timezone.utc)
+
+
+def get_bep_days() -> tuple:
+    """### Read the two break-even horizons from the environment.
+
+    They answer different questions and are therefore separate variables:
+
+      - BEP_GROWTH_DAYS is how far back the daily market value growth is averaged.
+      - BEP_TARGET_DAYS is how far ahead a suggested bid has to break even.
+
+    A 14 day payback judged on three days of momentum is a different statement from one
+    judged on fourteen, and both are legitimate - so neither is derived from the other.
+
+    Raises:
+        exceptions.KickbaseException: If either value is not a positive integer, or if
+            BEP_GROWTH_DAYS exceeds what the market value history can cover.
+
+    Returns:
+        tuple: (growth_days, target_days), both int.
+    """
+    def positive_int(name: str, default: int) -> int:
+        raw = getenv(name)
+
+        ### Unset means "use the default". Set-but-empty is a mistake, not an unset
+        ### value, so it falls through to int() below and is rejected there.
+        if raw is None:
+            return default
+
+        try:
+            value = int(raw)
+        except ValueError:
+            raise exceptions.KickbaseException(
+                f"{name} '{raw}' is not a whole number of days. Use e.g. {name}=7."
+            )
+
+        if value < 1:
+            raise exceptions.KickbaseException(
+                f"{name} is {value}, but a horizon has to be at least one day."
+            )
+
+        return value
+
+    growth_days = positive_int("BEP_GROWTH_DAYS", DEFAULT_BEP_GROWTH_DAYS)
+    target_days = positive_int("BEP_TARGET_DAYS", DEFAULT_BEP_TARGET_DAYS)
+
+    ### A window wider than the history is not a smaller answer, it is no answer: every
+    ### player would show a dash in both break-even columns, with nothing saying why.
+    if growth_days > MAX_BEP_GROWTH_DAYS:
+        raise exceptions.KickbaseException(
+            f"BEP_GROWTH_DAYS is {growth_days}, but the market value history covers 365 "
+            f"days, so at most {MAX_BEP_GROWTH_DAYS} can be averaged over."
+        )
+
+    return growth_days, target_days
 
 
 def parse_feed_timestamp(timestamp: str) -> datetime:

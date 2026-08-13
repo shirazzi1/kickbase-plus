@@ -92,6 +92,7 @@ def main() -> None:
     ### that check and would only fail minutes later, in turnovers().
     try:
         miscellaneous.get_start_datetime()
+        miscellaneous.get_bep_days()
     except exceptions.KickbaseException as e:
         logging.error(f"{e} Exiting...")
         exit(1)
