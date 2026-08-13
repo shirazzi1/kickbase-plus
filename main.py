@@ -168,9 +168,28 @@ def main(manifest: runs.RunManifest = None) -> runs.RunManifest:
     ### that check and would only fail minutes later, in turnovers().
     try:
         miscellaneous.get_start_datetime()
+        miscellaneous.get_bep_days()
     except exceptions.KickbaseException as e:
         logging.error(f"{e} Exiting...")
         manifest.record_failure("start_date", f"{type(e).__name__}: {e}")
+        return manifest
+
+    ### Written before any API call: it depends only on the environment, and the frontend
+    ### fails to build without it. Not folded into build_stages(): those all run after
+    ### login, and this has to survive a login failure or a Kickbase outage, same as the
+    ### START_DATE check above.
+    ###
+    ### Caught broadly rather than narrowed to KickbaseException: get_bep_days() already
+    ### validated the values above, so a failure here is a write failure, not a bad
+    ### config, and write_json_to_file() now raises whatever went wrong - an OSError, a
+    ### TypeError - rather than logging and carrying on (see its docstring). Letting that
+    ### escape here would crash the run before it leaves any record at all, which is
+    ### exactly what the run manifest exists to prevent.
+    try:
+        write_bep_config()
+    except Exception as e:
+        logging.error(f"Could not write the break-even config: {e}. Exiting...")
+        manifest.record_failure("bep_config", f"{type(e).__name__}: {e}")
         return manifest
 
     ### Start every run with empty API caches, so a long lived process (app.py) never
@@ -287,6 +306,26 @@ def get_gift(user_token: str) -> None:
         logging.info("Gift has already been collected!")
 
 
+def write_bep_config() -> None:
+    """### Hand the break-even horizons to the frontend as data.
+
+    The frontend needs both numbers - one to compute the suggested bid, one to say in the
+    help text what it is measuring - but it must not read them from its own environment.
+    The growth average needs the full market value history, which only this process has,
+    so a REACT_APP_ twin would be a second home for the same number, free to drift.
+
+    Two constants also do not belong in all 120 market rows, which is why this is a file
+    of its own rather than more fields on each row.
+    """
+    growth_days, target_days = miscellaneous.get_bep_days()
+
+    miscellaneous.write_json_to_file(
+        {"bepGrowthDays": growth_days, "bepTargetDays": target_days}, "config.json")
+
+    logging.info(f"Break-even horizons written: {growth_days} day growth average, "
+                 f"{target_days} day payback.")
+
+
 def market(user_token: str, selected_league: object, own_user_id: str) -> None:
     """### Retrieves all players listed on the transfer market.
 
@@ -294,10 +333,14 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
     the same decision for the user, so splitting them across two tables only meant
     comparing rows between them.
 
-    Each row also carries the user's own bid, the status note from the player profile
-    and the daily market value deltas. The profile and market value history are both
-    cached per run and this function runs before market_value_changes(), which asks for
-    both for every player in the competition anyway, so this costs no extra API calls.
+    Each row also carries the user's own bid, the seller's id (which the frontend
+    compares against the logged-in manager's own id to tell an own listing apart from
+    everyone else's, rather than this function answering that question itself), the
+    status note from the player profile, the daily market value deltas and the
+    averaged growth over the configured window. The profile and market value history
+    are both cached per run and this function runs before market_value_changes(),
+    which asks for both for every player in the competition anyway, so this costs no
+    extra API calls.
 
     Args:
         user_token (str): The user's kkstrauth token.
@@ -305,6 +348,9 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
         own_user_id (str): The logged in user's ID, to identify their own bids.
     """
     logging.info("Getting players listed on transfer market...")
+
+    ### The growth window is configuration, so it is read once per run rather than per player
+    growth_days, _ = miscellaneous.get_bep_days()
 
     ### Get all players on the market
     players_on_market = leagues.get_market(user_token, selected_league.id)
@@ -320,7 +366,11 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
         player_stats = leagues.player_statistics(user_token, selected_league.id, player.id)
         status_text = (player_stats.get("stxt") or "").strip() or None
 
-        deltas = miscellaneous.market_value_deltas(leagues.player_marketvalue(user_token, player.id))
+        ### Kept in a variable: the deltas and the averaged growth read the same history,
+        ### and the fetch is cached per run anyway
+        market_value_history = leagues.player_marketvalue(user_token, player.id)
+        deltas = miscellaneous.market_value_deltas(market_value_history)
+        avg_daily_growth = miscellaneous.average_daily_growth(market_value_history, growth_days)
 
         own_bid = player.own_offer(own_user_id)
 
@@ -347,7 +397,8 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
 
         player_info = {
             ### The row identity. The table used to key its rows by array position, so a
-            ### sale shifted every row below it onto a different player.
+            ### sale shifted every row below it onto a different player. Also what the
+            ### bid endpoints name a player by.
             "playerId": player.id,
             "teamId": player.teamId,
             "position": miscellaneous.POSITIONS[player.position],
@@ -362,6 +413,10 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
             ### Who to exclude from the bidders for this player. The display name alone
             ### cannot do it: the auction solver joins listings against balances.json, and
             ### two managers may well pick the same name. None for Kickbase's own listings.
+            ### Also what the frontend compares against the logged-in manager's own id to
+            ### decide whether a listing is the user's own - there is no separate
+            ### "isOwnListing" field here, so that question has exactly one computation
+            ### instead of a frontend copy that could drift from this one.
             "sellerId": player.userId,
             "isFreeAgent": not player.username,
             "expiration": expiration,
@@ -369,6 +424,8 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
             ### How many managers are bidding. Kickbase never reveals whose bids they are,
             ### only how many there are.
             "offerCount": player.ofc,
+            ### The pace both break-even columns are computed from
+            "avgDailyGrowth": avg_daily_growth,
             **deltas,
         }
 

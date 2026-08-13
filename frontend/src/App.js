@@ -38,6 +38,9 @@ import Balances from "./components/Balances"
 import Battles from "./components/Battles"
 import ManagerDossier from "./components/ManagerDossier"
 
+// Import config
+import config from "./data/config.json"
+
 // Import timestamps
 import timestamp_main from "./data/timestamps/ts_main.json"
 import timestamp_market from "./data/timestamps/ts_market.json"
@@ -203,7 +206,7 @@ function App() {
             
             {/* "Transfers" related components */}
             <Paper sx={{ marginTop: "25px" }} elevation={5}>
-              <Typography variant="h4" sx={{ padding: "15px" }}>Transfermarkt <HelpIcon text="Alle Spieler auf dem Transfermarkt. Hellblau hinterlegte Zeilen sind Free Agents, also direkt von Kickbase gelistet; alle anderen sind von Nutzern aus der Liga gelistet. 'Dein Gebot' zeigt dein laufendes Gebot und den Aufschlag auf den aktuellen Marktwert. Ein Ablaufdatum liefert Kickbase nur für die eigenen Angebote. 'Tage bis BEP' sind die Tage, die der Marktwert beim Zuwachs der letzten drei Tage braucht, um den Preis einzuholen; ein Strich heißt, dass der Marktwert gerade nicht steigt. Neben jeder Euro-Spalte steht derselbe Zuwachs relativ zum aktuellen Marktwert. 'Verdeckte Bieter', 'Mindestgebot' und 'Zwangsverkauf droht' rechnen mit den geschätzten Budgets aus den Balances - Kickbase verrät weder Kontostände noch wer bietet, also sind das Schätzungen; die Spaltenköpfe sagen jeweils, welche. Die Bieter-Übersicht über der Tabelle zeigt alle Manager nach geschätztem Maximalgebot. 'Wahrscheinliche Mitbieter' schneidet diese Budgets mit dem bisherigen Kaufverhalten aus dem Manager-Dossier: Manager, die den Preis zahlen könnten und die öfter bei diesem Klub oder überwiegend in steigende Marktwerte kaufen. Die Spalte erscheint erst, wenn ein Scrape-Lauf die Manager-Profile geschrieben hat."/></Typography>
+              <Typography variant="h4" sx={{ padding: "15px" }}>Transfermarkt <HelpIcon text={`Alle Spieler auf dem Transfermarkt. Hellblau hinterlegte Zeilen sind Free Agents, also direkt von Kickbase gelistet; alle anderen sind von Nutzern aus der Liga gelistet. 'Dein Gebot' zeigt dein laufendes Gebot und den Aufschlag auf den aktuellen Marktwert; ist keines abgegeben, steht dort grau das Gebot, das beim durchschnittlichen Zuwachs der letzten ${config.bepGrowthDays} Tage in ${config.bepTargetDays} Tagen Break-Even erreicht. Ein Klick macht das Feld editierbar und gibt das Gebot direkt bei Kickbase ab. Ein Ablaufdatum liefert Kickbase nur für die eigenen Angebote. 'Tage bis BEP' sind die Tage, die der Marktwert beim Zuwachs der letzten ${config.bepGrowthDays} Tage braucht, um den Preis einzuholen; ein Strich heißt, dass der Marktwert gerade nicht steigt. Neben jeder Euro-Spalte steht derselbe Zuwachs relativ zum aktuellen Marktwert. 'Verdeckte Bieter', 'Mindestgebot' und 'Zwangsverkauf droht' rechnen mit den geschätzten Budgets aus den Balances - Kickbase verrät weder Kontostände noch wer bietet, also sind das Schätzungen; die Spaltenköpfe sagen jeweils, welche. Die Bieter-Übersicht über der Tabelle zeigt alle Manager nach geschätztem Maximalgebot. 'Wahrscheinliche Mitbieter' schneidet diese Budgets mit dem bisherigen Kaufverhalten aus dem Manager-Dossier: Manager, die den Preis zahlen könnten und die öfter bei diesem Klub oder überwiegend in steigende Marktwerte kaufen. Die Spalte erscheint erst, wenn ein Scrape-Lauf die Manager-Profile geschrieben hat.`}/></Typography>
               <MarketTable />
             </Paper>
             <Paper sx={{ marginTop: "25px" }} elevation={5}>

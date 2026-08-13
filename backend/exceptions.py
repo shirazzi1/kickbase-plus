@@ -81,3 +81,33 @@ class ApiUnreachableException(HttpException):
 class ApiResponseException(HttpException):
     """The API answered, but the body was not the JSON the caller expected."""
     pass
+
+
+### ===============================================================================
+### The market write path
+###
+### place_offer()/remove_offer() go through the same pooled client as every read above,
+### with retry=False (see backend/kickbase/v4/leagues.py for why: Kickbase answers a
+### rejected bid with a 5xx, and retrying that three times would turn "bid too low" into
+### a false "Kickbase is down"). What used to be a standalone KickbaseWriteException(
+### KickbaseException) with its own (status, message) is folded into HttpException here
+### instead of duplicating that shape a second time - HttpException already carries a
+### message, a url and a status_code.
+### ===============================================================================
+
+class OfferRejectedException(HttpException):
+    """Kickbase answered a market offer write (a bid or its withdrawal) with an error
+    status.
+
+    A transport failure (timeout, DNS, connection refused) never becomes one of these -
+    that is ApiUnreachableException, raised by http.request() itself and left to travel
+    on to the caller's generic KickbaseException handling, same as every other call in
+    this project. This class exists only for a status Kickbase did answer with.
+
+    status_code is already normalised for the browser by _offer_failure(): a 5xx that
+    carries an error code becomes 400 (the bid was the user's to get wrong), a codeless
+    5xx becomes 502, and a 4xx passes through unchanged. The message is Kickbase's own
+    errMsg, or a German translation for the codes seen live - never the numeric "err",
+    which would show the user "5080".
+    """
+    pass

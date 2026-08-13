@@ -38,6 +38,11 @@ jest.mock("../data/market.json", () => ([
     }
 ]))
 
+// MarketTable.js also imports config.json at module scope now (the break-even horizons) -
+// mocked for the same reason market.json above is: this suite runs against fixed fixtures,
+// not against whatever main.py happened to write into a checkout most recently.
+jest.mock("../data/config.json", () => ({ bepGrowthDays: 3, bepTargetDays: 3 }))
+
 // Three managers: one rich rival, the user, and a seller deep in the red. Both listings are
 // priced at 10.000.000, so Anna can pay and the seller's own money is irrelevant.
 jest.mock("../data/balances.json", () => ([
