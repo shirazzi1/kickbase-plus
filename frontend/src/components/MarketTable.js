@@ -24,7 +24,7 @@ import {
     forcedSaleRisk
 } from "./marketFormulas"
 import ManagerStacks, { ESTIMATE_NOTE } from "./ManagerStacks"
-import { bidderChipLabel, likelyBidders, loadManagerProfiles } from "./managerProfiles"
+import { bidderChipLabel, likelyBidders, loadManagerProfiles, managerProfileList } from "./managerProfiles"
 
 // Import data
 import data from "../data/market.json"
@@ -33,7 +33,12 @@ import balances from "../data/balances.json"
 // The manager fingerprints behind the "Wahrscheinliche Mitbieter" column. Null until a
 // scrape has written manager_profiles.json, and the column is then left out entirely rather
 // than shown empty - an empty cell there would claim nobody wants the player.
+//
+// A document with no managers in it counts as no document, the same way the dossier tab
+// reads it: the backend writes an entry per league member, so an empty one is a file that
+// cannot answer anything rather than a league that has not traded.
 const profiles = loadManagerProfiles()
+const hasProfiles = managerProfileList(profiles).length > 0
 
 const daysFormatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 })
 
@@ -369,7 +374,7 @@ function MarketTable() {
         },
         // Only when there are fingerprints to match against. Without them the column would
         // be a row of dashes that reads as "nobody is interested in these players".
-        ...(profiles ? [{
+        ...(hasProfiles ? [{
             field: "likelyBidders",
             headerName: "Wahrscheinliche Mitbieter",
             type: "number",
