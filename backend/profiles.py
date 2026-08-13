@@ -24,6 +24,10 @@ a metric's "n" is the honest coverage, never a filled-in guess. The known gaps a
     -- if market_value_changes() failed this run, the cache is empty and both market value
        metrics report n = 0 for everyone.
 
+Which is why the file leads with a "marketValueCoverage" header: n = 0 everywhere otherwise
+looks the same whether nobody ever bought anything or the stage that fetches the curves died
+this run. See build_profiles().
+
 The hold duration has a wrinkle of its own, and QUICK_ROUND_TRIP is where it is written
 down: managers buy a player off the market and sell them straight back seconds later to
 collect the trade count bonus, which drags the median down to a few hours for the busiest
@@ -155,7 +159,7 @@ def app_timezone() -> ZoneInfo:
 
 def build_profiles(transfers: list, turnovers: list, name_to_id: dict,
                    market_values: dict = None, team_names: dict = None) -> dict:
-    """### Build one behavioural fingerprint per manager.
+    """### Build the whole profiles document: the coverage header and one entry per manager.
 
     Every manager in the league index gets an entry, even one who has not traded yet: an
     honest n = 0 is readable, a missing key is a bug the frontend has to guess at.
@@ -163,6 +167,13 @@ def build_profiles(transfers: list, turnovers: list, name_to_id: dict,
     The feed names managers, it does not identify them, so both sides of every booking are
     resolved through the shared name index. A booking that cannot be attributed is left
     out - see miscellaneous.resolve_user_id() for when that happens.
+
+    "marketValueCoverage" is the header that keeps the file honest about its own inputs. Two
+    market value metrics depend on curves this module does not fetch, so an empty cache and
+    a manager who has never bought anything both end up at n = 0 - which a reader cannot
+    tell apart from the profiles alone. The header states how many of the players anyone
+    bought had a curve to look up, so "0 of 178" reads as a dead upstream stage rather than
+    as a league that never trades.
 
     Args:
         transfers (list): Activity feed items, as all_transfers.json holds them.
@@ -173,7 +184,7 @@ def build_profiles(transfers: list, turnovers: list, name_to_id: dict,
         team_names (dict): Team ID to team name, for the favourite clubs.
 
     Returns:
-        dict: Manager ID to their fingerprint.
+        dict: marketValueCoverage, and managers as manager ID to their fingerprint.
     """
     market_values = market_values or {}
     team_names = team_names or {}
@@ -198,7 +209,33 @@ def build_profiles(transfers: list, turnovers: list, name_to_id: dict,
             "activityWindow": _activity_window_metric(activity_hours.get(manager_id, [])),
         }
 
-    return profiles
+    return {
+        "marketValueCoverage": _coverage(buys, market_values),
+        "managers": profiles,
+    }
+
+
+def _coverage(buys: dict, market_values: dict) -> dict:
+    """### How much of what the market value metrics need was actually available.
+
+    The denominator is the players somebody bought, because those are the only curves the
+    two market value metrics ever consult. Counting the whole competition would make the
+    coverage look terrible for no reason.
+
+    Args:
+        buys (dict): Manager ID to their purchases, from _buys_and_activity().
+        market_values (dict): Player ID to {date: market value}.
+
+    Returns:
+        dict: players - how many had a curve - and of, how many were needed.
+    """
+    bought = {buy["playerId"] for manager_buys in buys.values() for buy in manager_buys
+              if buy["playerId"] is not None}
+
+    return {
+        "players": sum(1 for player_id in bought if market_values.get(player_id)),
+        "of": len(bought),
+    }
 
 
 def _hold_durations(turnovers: list, known_ids: set) -> dict:
@@ -318,14 +355,23 @@ def _hold_duration_metric(holds: list) -> dict:
         holds (list): The manager's holds from _hold_durations().
 
     Returns:
-        dict: medianDays (None without data), n, and roundTripsWithinAnHour - see
-            QUICK_ROUND_TRIP for why those are counted next to the median instead of
-            being taken out of it.
+        dict: medianDays and medianSeconds (both None without data), n, and
+            roundTripsWithinAnHour - see QUICK_ROUND_TRIP for why those are counted next to
+            the median instead of being taken out of it.
     """
     days = [hold["days"] for hold in holds]
 
+    ### One median, reported in two units, because the durations in this data span five
+    ### orders of magnitude. Days is the unit the metric is about, at three decimals rather
+    ### than one: rounded to one, the managers whose median is a round trip read as
+    ### "0.0 days" next to an n that says there were six sales - a real number that looks
+    ### like a missing one. Three decimals cover the normal range, and medianSeconds carries
+    ### the exact value for the fast end, where even three decimals still round to zero.
+    median_days = median(days) if days else None
+
     return {
-        "medianDays": round(median(days), 1) if days else None,
+        "medianDays": round(median_days, 3) if days else None,
+        "medianSeconds": round(median_days * 86400) if days else None,
         "n": len(days),
         "roundTripsWithinAnHour": sum(1 for hold in holds if hold["roundTrip"]),
     }
@@ -384,6 +430,9 @@ def _momentum_metric(manager_buys: list, market_values: dict) -> dict:
         market_value = _market_value_on(buy, market_values, offset_days=0)
         earlier = _market_value_on(buy, market_values, offset_days=-MOMENTUM_WINDOW_DAYS)
 
+        ### Only a missing day is skipped here, where _markup_metric() also skips a value of
+        ### zero. The asymmetry is deliberate: a ratio needs a denominator, a comparison does
+        ### not, so a market value of zero is a rising or falling trend like any other.
         if market_value is None or earlier is None:
             continue
 
@@ -515,10 +564,11 @@ def _load_json(file_name: str, written_by: str):
 def write_manager_profiles() -> None:
     """### Stage: derive every manager's fingerprint and write manager_profiles.json.
 
-    Runs last in a run, because it reads what four earlier stages wrote: the feed cache
-    and turnovers.json from turnovers(), STATIC_users.json from the login, STATIC_teams.json
-    from market_value_changes() - which also leaves the market value curves in the cache
-    the two market value metrics read.
+    Runs last in a run, because it reads what earlier stages wrote: the feed cache and
+    turnovers.json from turnovers(), and both STATIC_users.json and STATIC_teams.json from
+    market_value_changes() - which also leaves the market value curves in the cache the two
+    market value metrics read. STATIC_users.json is written by leagues.get_users(), and
+    market_value_changes() is its only caller, whatever the comment on login() says.
 
     Raises:
         exceptions.KickbaseException: If one of those files is missing or unreadable. The
@@ -529,7 +579,7 @@ def write_manager_profiles() -> None:
 
     transfers = _load_json("all_transfers.json", written_by="turnovers")
     turnovers = _load_json("turnovers.json", written_by="turnovers")
-    league_users = _load_json("STATIC_users.json", written_by="login")
+    league_users = _load_json("STATIC_users.json", written_by="market_value_changes")
     teams = _load_json("STATIC_teams.json", written_by="market_value_changes")
 
     name_to_id = miscellaneous.build_user_name_index(league_users)
@@ -543,14 +593,20 @@ def write_manager_profiles() -> None:
                   if (item.get("data") or {}).get("pi") is not None}
     market_values = market_values_from_run_cache(player_ids)
 
-    ### Coverage is the honest part of this stage, so it is logged rather than left to be
-    ### inferred from the n fields
-    logging.info(f"Market value curves available for {len(market_values)} of "
-                 f"{len(player_ids)} traded players.")
+    document = build_profiles(transfers, turnovers, name_to_id, market_values, team_names)
 
-    profiles = build_profiles(transfers, turnovers, name_to_id, market_values, team_names)
+    miscellaneous.write_json_to_file(document, "manager_profiles.json")
+    miscellaneous.write_timestamp("ts_manager_profiles.json", rows=len(document["managers"]))
 
-    miscellaneous.write_json_to_file(profiles, "manager_profiles.json")
-    miscellaneous.write_timestamp("ts_manager_profiles.json", rows=len(profiles))
+    ### Coverage goes in the file as well as in the log. The log is where an empty cache is
+    ### noticed while looking at a run; the file is where a consumer can tell "nobody buys
+    ### anything" apart from "the stage that fetches the curves died this run".
+    coverage = document["marketValueCoverage"]
+    logging.info(f"Built profiles for {len(document['managers'])} managers. Market value "
+                 f"curves available for {coverage['players']} of {coverage['of']} bought "
+                 "players.")
 
-    logging.info(f"Built profiles for {len(profiles)} managers.")
+    if coverage["of"] and not coverage["players"]:
+        logging.warning("No market value curve was cached for any bought player, so the "
+                        "markup and momentum metrics are empty. This run's "
+                        "market_value_changes stage is what fills that cache.")

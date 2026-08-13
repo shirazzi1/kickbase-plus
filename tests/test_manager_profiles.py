@@ -105,11 +105,20 @@ def curve(player_id, points):
     return {player_id: [{"dt": julian(day), "mv": mv} for day, mv in sorted(points.items())]}
 
 
+def build(transfers=None, turnovers=None, market_values=None):
+    """Build the whole document: the coverage header plus every manager."""
+    return profiles.build_profiles(transfers or [], turnovers or [], NAME_TO_ID,
+                                   market_values, TEAM_NAMES)
+
+
+def managers(transfers=None, turnovers=None, market_values=None):
+    """Build the document and return only the managers."""
+    return build(transfers, turnovers, market_values)["managers"]
+
+
 def profile_for(user_id, transfers=None, turnovers=None, market_values=None):
     """Build the profiles and return the one of a single manager."""
-    built = profiles.build_profiles(transfers or [], turnovers or [], NAME_TO_ID,
-                                    market_values, TEAM_NAMES)
-    return built[user_id]
+    return managers(transfers, turnovers, market_values)[user_id]
 
 
 ### ===============================================================================
@@ -151,7 +160,8 @@ def test_median_hold_duration_over_three_sales():
         turnover("1", "102", "2026-08-02T12:00:00Z", "2026-08-12T12:00:00Z"),
     ]
     metric = profile_for("1", turnovers=turnovers)["holdDuration"]
-    assert metric == {"medianDays": 4.0, "n": 3, "roundTripsWithinAnHour": 0}, f"got {metric}"
+    assert metric == {"medianDays": 4.0, "medianSeconds": 345600,
+                      "n": 3, "roundTripsWithinAnHour": 0}, f"got {metric}"
 
 
 def test_median_hold_duration_averages_the_middle_two():
@@ -161,24 +171,49 @@ def test_median_hold_duration_averages_the_middle_two():
         turnover("2", "101", "2026-08-02T12:00:00Z", "2026-08-06T12:00:00Z"),
     ]
     metric = profile_for("2", turnovers=turnovers)["holdDuration"]
-    assert metric == {"medianDays": 2.5, "n": 2, "roundTripsWithinAnHour": 0}, f"got {metric}"
+    assert metric == {"medianDays": 2.5, "medianSeconds": 216000,
+                      "n": 2, "roundTripsWithinAnHour": 0}, f"got {metric}"
 
 
 def test_hold_duration_counts_part_days():
     turnovers = [turnover("1", "100", "2026-08-02T00:00:00Z", "2026-08-03T12:00:00Z")]
     metric = profile_for("1", turnovers=turnovers)["holdDuration"]
-    assert metric == {"medianDays": 1.5, "n": 1, "roundTripsWithinAnHour": 0}, f"got {metric}"
+    assert metric == {"medianDays": 1.5, "medianSeconds": 129600,
+                      "n": 1, "roundTripsWithinAnHour": 0}, f"got {metric}"
 
 
 def test_hold_duration_counts_a_round_trip_through_the_market_without_dropping_it():
     ### Bought off the market and sold straight back to it: a trade count bonus, not a
     ### hold. It stays in the median and is counted, so the number can be read honestly.
     turnovers = [
-        turnover("1", "100", "2026-08-09T09:15:37Z", "2026-08-09T09:15:52Z"),
+        turnover("1", "100", "2026-08-09T09:15:37Z", "2026-08-09T09:15:53Z"),
         turnover("1", "101", "2026-08-02T12:00:00Z", "2026-08-06T12:00:00Z"),
     ]
+    ### The median of sixteen seconds and four days, which is two days to the second
     metric = profile_for("1", turnovers=turnovers)["holdDuration"]
-    assert metric == {"medianDays": 2.0, "n": 2, "roundTripsWithinAnHour": 1}, f"got {metric}"
+    assert metric == {"medianDays": 2.0, "medianSeconds": 172808,
+                      "n": 2, "roundTripsWithinAnHour": 1}, f"got {metric}"
+
+
+def test_a_median_of_seconds_stays_readable():
+    ### Two round trips, 14 and 30 seconds. In days that is 0.0 at any sane number of
+    ### decimals, which reads like missing data next to an n of 2 - so the exact value is
+    ### reported in seconds as well.
+    turnovers = [
+        turnover("1", "100", "2026-08-09T09:15:37Z", "2026-08-09T09:15:51Z"),
+        turnover("1", "101", "2026-08-09T10:00:00Z", "2026-08-09T10:00:30Z"),
+    ]
+    metric = profile_for("1", turnovers=turnovers)["holdDuration"]
+    assert metric["medianSeconds"] == 22, f"got {metric}"
+    assert metric["n"] == 2 and metric["roundTripsWithinAnHour"] == 2, f"got {metric}"
+
+
+def test_a_median_of_hours_is_no_longer_zero_in_days():
+    ### The case from the real league: a median of twelve minutes used to round to 0.0 days
+    turnovers = [turnover("1", "100", "2026-08-09T09:00:00Z", "2026-08-09T09:12:00Z")]
+    metric = profile_for("1", turnovers=turnovers)["holdDuration"]
+    assert metric["medianDays"] == 0.008, f"got {metric}"
+    assert metric["medianSeconds"] == 720, f"got {metric}"
 
 
 def test_a_quick_sale_to_another_manager_is_no_round_trip():
@@ -204,21 +239,23 @@ def test_hold_duration_ignores_players_assigned_at_the_season_start():
                  buy_type="assigned_at_start"),
     ]
     metric = profile_for("1", turnovers=turnovers)["holdDuration"]
-    assert metric == {"medianDays": 2.0, "n": 1, "roundTripsWithinAnHour": 0}, f"got {metric}"
+    assert metric == {"medianDays": 2.0, "medianSeconds": 172800,
+                      "n": 1, "roundTripsWithinAnHour": 0}, f"got {metric}"
 
 
 def test_hold_duration_ignores_a_pair_the_buyer_did_not_sell():
     ### Alpha bought, Beta sold on: the pair belongs to neither fingerprint
     turnovers = [turnover("1", "100", "2026-08-02T12:00:00Z", "2026-08-09T12:00:00Z",
                           seller_id="2")]
-    built = profiles.build_profiles([], turnovers, NAME_TO_ID, None, TEAM_NAMES)
+    built = managers(turnovers=turnovers)
     assert built["1"]["holdDuration"]["n"] == 0, f"got {built['1']['holdDuration']}"
     assert built["2"]["holdDuration"]["n"] == 0, f"got {built['2']['holdDuration']}"
 
 
 def test_hold_duration_without_a_single_sale():
     metric = profile_for("1")["holdDuration"]
-    assert metric == {"medianDays": None, "n": 0, "roundTripsWithinAnHour": 0}, f"got {metric}"
+    assert metric == {"medianDays": None, "medianSeconds": None,
+                      "n": 0, "roundTripsWithinAnHour": 0}, f"got {metric}"
 
 
 ### ===============================================================================
@@ -414,7 +451,7 @@ def test_activity_window_without_a_single_booking():
 
 
 def test_every_league_manager_gets_a_profile():
-    built = profiles.build_profiles([], [], NAME_TO_ID, None, TEAM_NAMES)
+    built = managers()
     ### The two managers sharing a display name are left out: their bookings cannot be
     ### told apart, so a fingerprint for either would be someone else's behaviour
     assert sorted(built) == ["1", "2"], f"got {sorted(built)}"
@@ -422,8 +459,7 @@ def test_every_league_manager_gets_a_profile():
 
 
 def test_an_unknown_manager_gets_no_profile():
-    built = profiles.build_profiles([buy("Ghost", "10", 1_000_000, BUY_AT)], [],
-                                   NAME_TO_ID, None, TEAM_NAMES)
+    built = managers([buy("Ghost", "10", 1_000_000, BUY_AT)])
     assert sorted(built) == ["1", "2"], f"got {sorted(built)}"
     assert built["1"]["topClubs"]["n"] == 0, f"got {built['1']['topClubs']}"
 
@@ -432,7 +468,7 @@ def test_a_booking_between_managers_counts_for_both_sides():
     ### Beta sells to Alpha: a purchase for Alpha, trading activity for both. turnovers()
     ### records such an item as a sale only, which is why the buy side is read from the feed.
     transfers = [buy("Alpha", "10", 1_000_000, "2026-08-10T20:30:00Z", seller="Beta")]
-    built = profiles.build_profiles(transfers, [], NAME_TO_ID, None, TEAM_NAMES)
+    built = managers(transfers)
 
     assert built["1"]["purchaseMarkup"]["buysConsidered"] == 1, f"got {built['1']}"
     assert built["2"]["purchaseMarkup"]["buysConsidered"] == 0, f"got {built['2']}"
@@ -441,29 +477,81 @@ def test_a_booking_between_managers_counts_for_both_sides():
 
 
 ### ===============================================================================
+### The market value coverage header
+### ===============================================================================
+
+
+def test_coverage_counts_the_bought_players_that_have_a_curve():
+    market_values = markup_market_values()
+    del market_values["102"]
+
+    transfers = [buy("Alpha", "100", 1_100_000, BUY_AT),
+                 buy("Beta", "101", 1_100_000, BUY_AT),
+                 buy("Alpha", "102", 1_100_000, BUY_AT)]
+    coverage = build(transfers, market_values=market_values)["marketValueCoverage"]
+    assert coverage == {"players": 2, "of": 3}, f"got {coverage}"
+
+
+def test_coverage_says_zero_of_n_when_the_cache_is_empty():
+    ### This is the number that tells a consumer "the stage that fetches the curves died
+    ### this run" apart from "this league never buys anything"
+    transfers = [buy("Alpha", "100", 1_100_000, BUY_AT),
+                 buy("Alpha", "101", 1_100_000, BUY_AT)]
+    coverage = build(transfers)["marketValueCoverage"]
+    assert coverage == {"players": 0, "of": 2}, f"got {coverage}"
+
+
+def test_coverage_counts_a_player_two_managers_bought_once():
+    transfers = [buy("Alpha", "100", 1_100_000, BUY_AT),
+                 buy("Beta", "100", 1_200_000, BUY_AT)]
+    coverage = build(transfers, market_values=markup_market_values())["marketValueCoverage"]
+    assert coverage == {"players": 1, "of": 1}, f"got {coverage}"
+
+
+def test_coverage_leaves_out_players_that_were_only_sold():
+    ### A sale needs no market value, so it does not belong in the denominator
+    transfers = [sell("Alpha", "100", 1_100_000, BUY_AT)]
+    coverage = build(transfers)["marketValueCoverage"]
+    assert coverage == {"players": 0, "of": 0}, f"got {coverage}"
+
+
+def test_coverage_without_any_transfers():
+    assert build()["marketValueCoverage"] == {"players": 0, "of": 0}, f"got {build()}"
+
+
+### ===============================================================================
 ### write_manager_profiles() as a stage
 ### ===============================================================================
 
 
-def test_the_stage_writes_the_file_from_the_run_cache():
-    """The stage reads the run's files, uses the cached curves, and writes the profiles."""
+def stage_files(without=None):
+    """The four files the stage reads, with the option to leave one out."""
+    files = {
+        "STATIC_users.json": USERS,
+        "STATIC_teams.json": [{"teamId": "2", "teamName": "Bayern", "players": []}],
+        "all_transfers.json": [
+            buy("Alpha", "100", 1_100_000, BUY_AT),
+            sell("Alpha", "100", 1_500_000, "2026-08-12T12:00:00Z"),
+        ],
+        "turnovers.json": [turnover("1", "100", BUY_AT, "2026-08-12T12:00:00Z")],
+    }
+
+    if without is not None:
+        del files[without]
+
+    return files
+
+
+def run_stage(files, cached=None):
+    """Run the stage against a temporary data directory holding `files`.
+
+    `cached` stands in for the market value curves the run left in leagues.py - the public
+    accessor is replaced, so nothing can reach the API even by accident.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         data_dir = path.join(tmp, "data")
         ts_dir = path.join(data_dir, "timestamps")
         makedirs(ts_dir, exist_ok=True)
-
-        histories = curve("100", {BUY_DAY - timedelta(days=profiles.MOMENTUM_WINDOW_DAYS): 1_000_000,
-                                  BUY_DAY: 1_000_000})
-
-        files = {
-            "STATIC_users.json": USERS,
-            "STATIC_teams.json": [{"teamId": "2", "teamName": "Bayern", "players": []}],
-            "all_transfers.json": [
-                buy("Alpha", "100", 1_100_000, BUY_AT),
-                sell("Alpha", "100", 1_500_000, "2026-08-12T12:00:00Z"),
-            ],
-            "turnovers.json": [turnover("1", "100", BUY_AT, "2026-08-12T12:00:00Z")],
-        }
 
         for file_name, content in files.items():
             with open(path.join(data_dir, file_name), "w") as f:
@@ -474,25 +562,46 @@ def test_the_stage_writes_the_file_from_the_run_cache():
         profiles.DATA_DIR = data_dir
         miscellaneous.DATA_DIR = data_dir
         miscellaneous.TIMESTAMP_DIR = ts_dir
-        ### Only what the run already fetched, never a fresh request
-        leagues.cached_market_value = lambda player_id: histories.get(str(player_id))
+        leagues.cached_market_value = lambda player_id: (cached or {}).get(str(player_id))
 
         try:
             profiles.write_manager_profiles()
 
             with open(path.join(data_dir, "manager_profiles.json")) as f:
-                written = json.load(f)
+                document = json.load(f)
             with open(path.join(ts_dir, "ts_manager_profiles.json")) as f:
                 stamp = json.load(f)
+
+            return document, stamp
         finally:
             (profiles.DATA_DIR, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
              leagues.cached_market_value) = original
 
-    assert sorted(written) == ["1", "2"], f"got {sorted(written)}"
 
-    alpha = written["1"]
-    assert alpha["holdDuration"] == {"medianDays": 2.0, "n": 1, "roundTripsWithinAnHour": 0}, \
-        f"got {alpha['holdDuration']}"
+def stage_error(files):
+    """Run the stage expecting it to fail, and return the message."""
+    try:
+        run_stage(files)
+    except Exception as e:
+        return str(e)
+
+    raise AssertionError("expected the stage to fail")
+
+
+def test_the_stage_writes_the_file_from_the_run_cache():
+    """The stage reads the run's files, uses the cached curves, and writes the profiles."""
+    histories = curve("100", {BUY_DAY - timedelta(days=profiles.MOMENTUM_WINDOW_DAYS): 1_000_000,
+                              BUY_DAY: 1_000_000})
+    document, stamp = run_stage(stage_files(), cached=histories)
+
+    assert sorted(document) == ["managers", "marketValueCoverage"], f"got {sorted(document)}"
+    assert document["marketValueCoverage"] == {"players": 1, "of": 1}, \
+        f"expected the cached curve counted, got {document['marketValueCoverage']}"
+    assert sorted(document["managers"]) == ["1", "2"], f"got {sorted(document['managers'])}"
+
+    alpha = document["managers"]["1"]
+    assert alpha["holdDuration"] == {"medianDays": 2.0, "medianSeconds": 172800, "n": 1,
+                                     "roundTripsWithinAnHour": 0}, f"got {alpha['holdDuration']}"
     assert alpha["purchaseMarkup"]["n"] == 1, f"expected the cached curve used, got {alpha}"
     assert alpha["purchaseMarkup"]["meanPercent"] == 10.0, f"got {alpha['purchaseMarkup']}"
     assert alpha["momentumBuys"]["n"] == 1, f"got {alpha['momentumBuys']}"
@@ -502,21 +611,34 @@ def test_the_stage_writes_the_file_from_the_run_cache():
     assert stamp["rows"] == 2, f"expected the timestamp to count the profiles, got {stamp}"
 
 
-def test_the_stage_names_the_missing_file_and_the_stage_behind_it():
-    with tempfile.TemporaryDirectory() as tmp:
-        original = profiles.DATA_DIR
-        profiles.DATA_DIR = tmp
+def test_the_stage_reports_an_empty_cache_as_zero_coverage():
+    document, _ = run_stage(stage_files())
+    assert document["marketValueCoverage"] == {"players": 0, "of": 1}, \
+        f"got {document['marketValueCoverage']}"
+    assert document["managers"]["1"]["purchaseMarkup"]["n"] == 0, "expected no markup data"
+    ### The metrics that need no curve are unaffected by the dead upstream stage
+    assert document["managers"]["1"]["holdDuration"]["n"] == 1, "expected the hold time kept"
 
-        try:
-            profiles.write_manager_profiles()
-        except Exception as e:
-            message = str(e)
-            assert "all_transfers.json" in message, f"error should name the file, got: {e}"
-            assert "turnovers" in message, f"error should name the stage, got: {e}"
-        else:
-            raise AssertionError("expected a failure when the input files are missing")
-        finally:
-            profiles.DATA_DIR = original
+
+def test_the_stage_names_the_missing_transfer_file_and_the_stage_behind_it():
+    message = stage_error(stage_files(without="all_transfers.json"))
+    assert "all_transfers.json" in message, f"error should name the file, got: {message}"
+    assert "turnovers" in message, f"error should name the stage, got: {message}"
+
+
+def test_the_stage_names_market_value_changes_for_the_user_index():
+    ### STATIC_users.json is written by leagues.get_users(), whose only caller is
+    ### market_value_changes(). Naming login() would send a reader to the wrong stage.
+    message = stage_error(stage_files(without="STATIC_users.json"))
+    assert "STATIC_users.json" in message, f"error should name the file, got: {message}"
+    assert "market_value_changes" in message, f"error should name the stage, got: {message}"
+    assert "login" not in message, f"login does not write this file, got: {message}"
+
+
+def test_the_stage_names_market_value_changes_for_the_team_list():
+    message = stage_error(stage_files(without="STATIC_teams.json"))
+    assert "STATIC_teams.json" in message, f"error should name the file, got: {message}"
+    assert "market_value_changes" in message, f"error should name the stage, got: {message}"
 
 
 ### ===============================================================================
@@ -534,6 +656,9 @@ if __name__ == "__main__":
     check("counts part days", test_hold_duration_counts_part_days)
     check("counts a round trip through the market without dropping it",
           test_hold_duration_counts_a_round_trip_through_the_market_without_dropping_it)
+    check("a median of seconds stays readable", test_a_median_of_seconds_stays_readable)
+    check("a median of minutes is no longer zero in days",
+          test_a_median_of_hours_is_no_longer_zero_in_days)
     check("a quick sale to another manager is no round trip",
           test_a_quick_sale_to_another_manager_is_no_round_trip)
     check("a sale back to the market after a day is no round trip",
@@ -574,10 +699,27 @@ if __name__ == "__main__":
     check("a booking between managers counts for both sides",
           test_a_booking_between_managers_counts_for_both_sides)
 
+    print("\nmarket value coverage")
+    check("counts the bought players that have a curve",
+          test_coverage_counts_the_bought_players_that_have_a_curve)
+    check("says zero of n when the cache is empty",
+          test_coverage_says_zero_of_n_when_the_cache_is_empty)
+    check("counts a player two managers bought once",
+          test_coverage_counts_a_player_two_managers_bought_once)
+    check("leaves out players that were only sold",
+          test_coverage_leaves_out_players_that_were_only_sold)
+    check("without any transfers", test_coverage_without_any_transfers)
+
     print("\nwrite_manager_profiles()")
     check("writes the file from the run cache", test_the_stage_writes_the_file_from_the_run_cache)
-    check("names the missing file and the stage behind it",
-          test_the_stage_names_the_missing_file_and_the_stage_behind_it)
+    check("reports an empty cache as zero coverage",
+          test_the_stage_reports_an_empty_cache_as_zero_coverage)
+    check("names the missing transfer file and the stage behind it",
+          test_the_stage_names_the_missing_transfer_file_and_the_stage_behind_it)
+    check("names market_value_changes for the user index",
+          test_the_stage_names_market_value_changes_for_the_user_index)
+    check("names market_value_changes for the team list",
+          test_the_stage_names_market_value_changes_for_the_team_list)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")
