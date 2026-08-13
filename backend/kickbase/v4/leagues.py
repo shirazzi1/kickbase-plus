@@ -24,6 +24,10 @@ from backend.kickbase.endpoints.leagues import League_Info, Market_Players
 ### the user's own Kickbase account, and being throttled costs more than it saves.
 MAX_PLAYER_WORKERS = 8
 
+### Seconds to wait for a write to Kickbase. Short on purpose: the user is waiting in
+### front of the field, and no other call in this module has a timeout at all.
+OFFER_TIMEOUT = 15
+
 _player_statistics_cache = {}
 _player_marketvalue_cache = {}
 _transfers_cache = {}
@@ -106,6 +110,131 @@ def get_market(token: str, league_id: str):
     players_on_market = [Market_Players(player) for player in json_response["it"]]
 
     return players_on_market
+
+
+### German for the Kickbase error codes seen live. "UnderpayNotAllowed" is accurate but
+### not a sentence to put in front of a user.
+OFFER_ERRORS = {
+    5080: "Das Gebot liegt unter dem Marktwert.",
+    6: "Kickbase hat das Gebot als ungültig abgewiesen.",
+}
+
+
+def _offer_headers(token: str) -> dict:
+    """### The headers every offer call sends."""
+    return {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Cookie": f"kkstrauth={token};",
+    }
+
+
+def _offer_failure(response) -> "exceptions.KickbaseWriteException":
+    """### Turn a refused offer write into an exception worth showing a user.
+
+    Two corrections happen here, both of them things the live API forced:
+
+    Kickbase reports a refused bid with HTTP 500 - a bid below the market value comes
+    back as {"err": 5080, "errMsg": "UnderpayNotAllowed"}. Forwarding that status would
+    blame the server for the user's typo and bury real outages among ordinary
+    rejections, so a 5xx carrying an error code becomes a 400. A 5xx without one is a
+    genuine outage and becomes a 502. A 4xx is already right and passes through.
+
+    And the message comes from "errMsg". "err" is a numeric code; reading it as a message
+    would show the user "5080".
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+
+    if not isinstance(body, dict):
+        body = {}
+
+    code = body.get("err")
+    ### The mapping first, then Kickbase's own English, then the bare status. Never "err".
+    message = (OFFER_ERRORS.get(code)
+               or body.get("errMsg")
+               or f"Kickbase antwortete mit HTTP {response.status_code}.")
+
+    if response.status_code < 500:
+        status = response.status_code
+    elif code is not None:
+        status = 400
+    else:
+        status = 502
+
+    return exceptions.KickbaseWriteException(status, message)
+
+
+def place_offer(token: str, league_id: str, player_id: str, price: int) -> dict:
+    """### Place a bid on a player listed on the transfer market.
+
+    The first write in this project. It deliberately does not follow the bare `except:`
+    around `.json()` that the reads in this module use: that pattern reports every
+    failure as a Discord webhook problem, and a bid needs its actual reason.
+
+    Args:
+        token (str): The user's kkstrauth token.
+        league_id (str): The league the player is listed in.
+        player_id (str): The player to bid on.
+        price (int): The bid, in whole euros.
+
+    Raises:
+        exceptions.KickbaseWriteException: If Kickbase rejects the bid or cannot be
+            reached. Carries the HTTP status and Kickbase's own message.
+
+    Returns:
+        dict: The response body, or an empty dict when there is none.
+    """
+    url = f"https://api.kickbase.com/v4/leagues/{league_id}/market/{player_id}/offers"
+
+    try:
+        response = requests.post(url, json={"price": price},
+                                 headers=_offer_headers(token), timeout=OFFER_TIMEOUT)
+    except requests.exceptions.RequestException as e:
+        raise exceptions.KickbaseWriteException(
+            504, f"Kickbase ist nicht erreichbar: {e}") from e
+
+    if response.status_code >= 400:
+        raise _offer_failure(response)
+
+    try:
+        return response.json() if response.content else {}
+    except ValueError:
+        return {}
+
+
+def remove_offer(token: str, league_id: str, player_id: str, own_user_id: str) -> None:
+    """### Withdraw the user's own bid on a player.
+
+    The offer is addressed by the user's own id, because that is the only identifier the
+    API exposes for it: "ofs" entries carry no offer id, and the POST that places a bid
+    hands the user id back as "ofi". DELETE on the bare collection answers 405, so the id
+    is not optional. A user holds at most one offer per player, which is what makes
+    keying by user sufficient.
+
+    Args:
+        token (str): The user's kkstrauth token.
+        league_id (str): The league the player is listed in.
+        player_id (str): The player whose bid is withdrawn.
+        own_user_id (str): The logged in user's ID, which identifies their offer.
+
+    Raises:
+        exceptions.KickbaseWriteException: If Kickbase rejects the removal or cannot be
+            reached.
+    """
+    url = (f"https://api.kickbase.com/v4/leagues/{league_id}/market/{player_id}"
+           f"/offers/{own_user_id}")
+
+    try:
+        response = requests.delete(url, headers=_offer_headers(token), timeout=OFFER_TIMEOUT)
+    except requests.exceptions.RequestException as e:
+        raise exceptions.KickbaseWriteException(
+            504, f"Kickbase ist nicht erreichbar: {e}") from e
+
+    if response.status_code >= 400:
+        raise _offer_failure(response)
 
 
 def prefetch_players(token: str, league_id: str, player_ids) -> None:
