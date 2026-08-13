@@ -8,7 +8,7 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 
 import { DataGrid } from '@mui/x-data-grid'
 
-import SwingMeter from './SwingMeter'
+import SwingMeter from "./SwingMeter"
 
 // Import data
 import data from '../data/live_points.json'

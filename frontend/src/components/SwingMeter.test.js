@@ -11,9 +11,15 @@ jest.mock("../data/match_days.json", () => ([
 
 jest.mock("../data/timestamps/ts_live_points.json", () => ({ time: "2020-01-01T00:00:00Z" }))
 
-// Three managers. "Ich" has two players left, "Max" one, "Zoe" is only there to give the
-// match day enough played players for an average.
+// Five managers. "Ich", "Max" and "Zoe" carry the small three-man squads of the first
+// scenario; "Aaron" and "Bea" the second one, where a full squad has played its eleven and
+// only the bench is left open.
 jest.mock("../data/taken_players.json", () => ([
+    ...Array.from({ length: 13 }, (unused, index) => ({
+        owner: "Aaron", playerId: `a${index}`, firstName: "Aaron", lastName: `Spieler ${index}`,
+        position: "MF", status: 0
+    })),
+    { owner: "Bea", playerId: "b1", firstName: "Bea", lastName: "Spieler 1", position: "ST", status: 0 },
     { owner: "Ich", playerId: "1", firstName: "Manuel", lastName: "Neuer", position: "TW", status: 0 },
     { owner: "Ich", playerId: "2", firstName: "Joshua", lastName: "Kimmich", position: "MF", status: 0 },
     { owner: "Ich", playerId: "3", firstName: "Jamal", lastName: "Musiala", position: "MF", status: 2 },
@@ -53,7 +59,7 @@ describe("SwingMeter", () => {
     })
 
     it("keeps the shared part visible and explains why it is empty", () => {
-        expect(screen.getByText("Geteilt, läuft noch (falls aufgestellt) – 0 Spieler")).toBeTruthy()
+        expect(screen.getByText("Geteilt, hebt sich auf (falls aufgestellt) – 0 Spieler")).toBeTruthy()
         expect(screen.getByText(/gehört ein Spieler nur einem Manager/)).toBeTruthy()
     })
 
@@ -84,5 +90,35 @@ describe("SwingMeter", () => {
 
     it("names the match day and its phase", () => {
         expect(screen.getByText("Spieltag 7 – läuft")).toBeTruthy()
+    })
+})
+
+// The regular state at the end of a match day, and the reason the banner counts what can be
+// fielded rather than what is open: eleven of Aaron's thirteen players have scored, the two
+// on the bench cannot move anything any more.
+describe("SwingMeter mit Kader über elf Spielern", () => {
+    const benchEntries = [
+        { userId: "10", userName: "Aaron", livePoints: 55, totalPoints: 500, players:
+            Array.from({ length: 11 }, (unused, index) => ({ playerId: `a${index}`, points: 5, fullName: `Aaron Spieler ${index}` })) },
+        { userId: "11", userName: "Bea", livePoints: 30, totalPoints: 400, players: [{ playerId: "b1", points: 30, fullName: "Bea Spieler 1" }] }
+    ]
+
+    beforeEach(() => render(<SwingMeter entries={benchEntries} />))
+
+    it("does not promise open players the lineup has no room for", () => {
+        expect(screen.getByText("Du liegst 25 Punkte vor Bea – kein Spieler kann noch punkten")).toBeTruthy()
+    })
+
+    it("agrees with the bars below it", () => {
+        expect(screen.getByText("Differential, läuft noch (falls aufgestellt) – 0 für dich")).toBeTruthy()
+        expect(screen.getByText("Differential, läuft noch (falls aufgestellt) – 0 für Bea")).toBeTruthy()
+        expect(screen.getByText("Der Abstand steht fest – es kann sich nichts mehr bewegen.")).toBeTruthy()
+    })
+
+    it("keeps the bench visible and marks it as not counting", () => {
+        expect(screen.getByText("Aaron Spieler 11")).toBeTruthy()
+        expect(screen.getByText("Aaron Spieler 12")).toBeTruthy()
+        expect(screen.getByText(
+            "Elf Spieler haben gepunktet – die 2 offenen sitzen auf der Bank und bewegen nichts mehr.")).toBeTruthy()
     })
 })

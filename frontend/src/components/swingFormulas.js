@@ -163,6 +163,8 @@ export function classifyRoster(players, phase) {
 
 const sumPoints = (players) => players.reduce((total, player) => total + (player.points || 0), 0)
 
+const identify = (player) => String(player.playerId)
+
 /**
  * The gap to a rival, split into the part that cannot move any more and the part that can.
  *
@@ -171,40 +173,59 @@ const sumPoints = (players) => players.reduce((total, player) => total + (player
  *   - `gap`: both sides' finished players. Positive means ahead. Since an open player has
  *     no points yet, this is the whole of the current difference — the other two buckets
  *     are what is still *at stake*, not parts of the number on the board.
- *   - `shared`: players open on both rosters. They cancel out, so they move nothing.
- *     Kickbase gives a player to exactly one manager per league, so this is normally
- *     empty; it is computed anyway because the two source files are written at different
- *     times, and a player transferred in between appears on both rosters. Counting him as
- *     a differential for both sides would invent swing in both directions at once.
+ *   - `shared`: players on *both* rosters. Neither their points nor their potential enter
+ *     the gap, because it is not established whose they are. Kickbase gives a player to
+ *     exactly one manager per league, so this is normally empty; it is computed anyway
+ *     because `live_points.json` and `taken_players.json` are written at different times,
+ *     and a player transferred in between appears on both rosters.
+ *
+ *     The comparison runs over the *whole* rosters, before anyone is classified as played
+ *     or open. That is the case this bucket exists for: the live endpoint credits such a
+ *     player's points to one of the two managers, so he is finished on one side and open
+ *     on the other. Intersecting only the open players would let him through, and his
+ *     points would land in the gap as if his owner were settled.
  *   - `ownOpen` / `rivalOpen`: the differentials. Every point they score moves the gap by
  *     its full amount — up for own players, down for the rival's.
  *
- * `startersLeft` is how many players each side may still field. A manager fields eleven,
- * so nine finished players leave room for two more, however large the squad is.
+ * `startersLeft` is how many players each side may still field, and `fieldable` how many
+ * of the open players that allows for: a manager fields eleven, so once eleven have
+ * scored, the rest of the squad is on the bench and can no longer move anything, however
+ * many open players are left. `fieldable` is the single count the banner, the bars and the
+ * range all speak in — *which* of the open players sit on the bench is not observable, so
+ * the lists stay complete and the count says how many of them can still matter.
  */
 export function decomposeSwing({ ownPlayers, rivalPlayers, phase }) {
-    const own = classifyRoster(ownPlayers, phase)
-    const rival = classifyRoster(rivalPlayers, phase)
+    const ownIds = new Set((ownPlayers || []).map(identify))
+    const sharedIds = new Set((rivalPlayers || []).map(identify).filter((id) => ownIds.has(id)))
 
-    const rivalOpenIds = new Set(rival.open.map((player) => player.playerId))
-    const ownOpenIds = new Set(own.open.map((player) => player.playerId))
+    // Whichever side the live endpoint credited the points to is the entry worth showing
+    const shared = [...sharedIds].map((id) => {
+        const mine = (ownPlayers || []).find((player) => identify(player) === id)
+        const theirs = (rivalPlayers || []).find((player) => identify(player) === id)
+        return Math.abs(theirs.points || 0) > Math.abs(mine.points || 0) ? theirs : mine
+    })
 
-    const shared = own.open.filter((player) => rivalOpenIds.has(player.playerId))
-    const ownOpen = own.open.filter((player) => !rivalOpenIds.has(player.playerId))
-    const rivalOpen = rival.open.filter((player) => !ownOpenIds.has(player.playerId))
+    const contested = (player) => sharedIds.has(identify(player))
+    const own = classifyRoster((ownPlayers || []).filter((player) => !contested(player)), phase)
+    const rival = classifyRoster((rivalPlayers || []).filter((player) => !contested(player)), phase)
 
     const ownPoints = sumPoints(own.played)
     const rivalPoints = sumPoints(rival.played)
+
+    const ownStartersLeft = Math.max(0, LINEUP_SIZE - own.played.length)
+    const rivalStartersLeft = Math.max(0, LINEUP_SIZE - rival.played.length)
 
     return {
         gap: ownPoints - rivalPoints,
         ownPlayed: { count: own.played.length, points: ownPoints },
         rivalPlayed: { count: rival.played.length, points: rivalPoints },
         shared,
-        ownOpen,
-        rivalOpen,
-        ownStartersLeft: Math.max(0, LINEUP_SIZE - own.played.length),
-        rivalStartersLeft: Math.max(0, LINEUP_SIZE - rival.played.length),
+        ownOpen: own.open,
+        rivalOpen: rival.open,
+        ownStartersLeft,
+        rivalStartersLeft,
+        ownFieldable: Math.min(own.open.length, ownStartersLeft),
+        rivalFieldable: Math.min(rival.open.length, rivalStartersLeft),
     }
 }
 
@@ -237,26 +258,20 @@ export function averagePointsPerPlayer(entries, phase, minPlayers = MIN_PLAYERS_
  * The gap's range if every player who may still be fielded scores the match day average.
  *
  * Not a probability and not a forecast: the arithmetic of "all my open players deliver
- * and none of his do" against the reverse. Open players beyond the eleven a manager may
- * field are left out, so a bench cannot inflate the swing.
+ * and none of his do" against the reverse. It counts `fieldable`, not the whole open list,
+ * so a bench cannot inflate the swing.
  *
  * Ceiling and floor are null without a reference value — a range of "0 to 0" would read
  * as a settled match day.
  */
 export function swingBounds(decomposition, pointsPerPlayer) {
-    const ownCount = Math.min(decomposition.ownOpen.length, decomposition.ownStartersLeft)
-    const rivalCount = Math.min(decomposition.rivalOpen.length, decomposition.rivalStartersLeft)
+    if (pointsPerPlayer === null || pointsPerPlayer === undefined)
+        return { ownSwing: null, rivalSwing: null, ceiling: null, floor: null }
 
-    if (pointsPerPlayer === null || pointsPerPlayer === undefined) {
-        return { ownCount, rivalCount, ownSwing: null, rivalSwing: null, ceiling: null, floor: null }
-    }
-
-    const ownSwing = ownCount * pointsPerPlayer
-    const rivalSwing = rivalCount * pointsPerPlayer
+    const ownSwing = decomposition.ownFieldable * pointsPerPlayer
+    const rivalSwing = decomposition.rivalFieldable * pointsPerPlayer
 
     return {
-        ownCount,
-        rivalCount,
         ownSwing,
         rivalSwing,
         ceiling: decomposition.gap + ownSwing,
@@ -268,11 +283,16 @@ export function swingBounds(decomposition, pointsPerPlayer) {
  * The banner sentence, e.g. "Du liegst 18 Punkte hinter Max – 3 deiner Spieler spielen
  * noch, 2 bei Max".
  *
+ * Counts `fieldable`, the same number the bars and the range use, so the banner cannot
+ * promise three players while the bars below it say nothing can move. Where the squad has
+ * more open players than the lineup has room for, the sentence says "höchstens" instead of
+ * quietly dropping the difference: which of them are on the bench is not observable.
+ *
  * German, because it is user facing, and built here rather than in the component so the
- * singular, the direction and the "nobody is playing any more" case are testable.
+ * singular, the direction and the "nothing can move any more" case are testable.
  */
 export function swingHeadline(decomposition, { rivalName }) {
-    const { gap, ownOpen, rivalOpen } = decomposition
+    const { gap, ownOpen, rivalOpen, ownFieldable, rivalFieldable } = decomposition
 
     let standing
     if (gap === 0)
@@ -283,15 +303,21 @@ export function swingHeadline(decomposition, { rivalName }) {
         standing = `Du liegst ${-gap} ${gap === -1 ? "Punkt" : "Punkte"} hinter ${rivalName}`
 
     const parts = []
-    if (ownOpen.length === 1)
+
+    if (ownFieldable > 0 && ownFieldable < ownOpen.length)
+        parts.push(`höchstens ${ownFieldable} deiner ${ownOpen.length} offenen Spieler ${ownFieldable === 1 ? "kann" : "können"} noch spielen`)
+    else if (ownFieldable === 1)
         parts.push("einer deiner Spieler spielt noch")
-    else if (ownOpen.length > 1)
-        parts.push(`${ownOpen.length} deiner Spieler spielen noch`)
-    if (rivalOpen.length > 0)
-        parts.push(`${rivalOpen.length} bei ${rivalName}`)
+    else if (ownFieldable > 1)
+        parts.push(`${ownFieldable} deiner Spieler spielen noch`)
+
+    if (rivalFieldable > 0 && rivalFieldable < rivalOpen.length)
+        parts.push(`höchstens ${rivalFieldable} von ${rivalOpen.length} bei ${rivalName}`)
+    else if (rivalFieldable > 0)
+        parts.push(`${rivalFieldable} bei ${rivalName}`)
 
     if (parts.length === 0)
-        return `${standing} – kein Spieler spielt noch`
+        return `${standing} – kein Spieler kann noch punkten`
 
     return `${standing} – ${parts.join(", ")}`
 }

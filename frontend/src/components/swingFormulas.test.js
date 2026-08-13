@@ -158,6 +158,33 @@ describe("decomposeSwing", () => {
         expect(decomposition.rivalOpen.map((entry) => entry.playerId)).toEqual(["3"])
     })
 
+    it("keeps a contested player out of the gap even when only one side has his points", () => {
+        // The real shape of a snapshot skew: the live endpoint credits the points to one of
+        // the two managers, so he is finished on that side and open on the other. Comparing
+        // only the open players would let him through and put his 20 points in the gap.
+        const decomposition = decomposeSwing({
+            ownPlayers: [player("1", 30), player("shared", 20)],
+            rivalPlayers: [player("2", 8), player("shared", 0)],
+            phase: RUNNING,
+        })
+
+        expect(decomposition.shared.map((entry) => entry.playerId)).toEqual(["shared"])
+        expect(decomposition.gap).toBe(22)
+        expect(decomposition.ownPlayed).toEqual({ count: 1, points: 30 })
+        expect(decomposition.ownOpen).toHaveLength(0)
+        expect(decomposition.rivalOpen).toHaveLength(0)
+    })
+
+    it("shows the points of a contested player from whichever side has them", () => {
+        const decomposition = decomposeSwing({
+            ownPlayers: [player("shared", 0, { name: "eigene Sicht" })],
+            rivalPlayers: [player("shared", 20, { name: "Sicht des Rivalen" })],
+            phase: RUNNING,
+        })
+
+        expect(decomposition.shared[0]).toMatchObject({ name: "Sicht des Rivalen", points: 20 })
+    })
+
     it("counts how many players each side may still field", () => {
         const nine = Array.from({ length: 9 }, (unused, index) => player(`o${index}`, 5))
         const decomposition = decomposeSwing({
@@ -168,13 +195,29 @@ describe("decomposeSwing", () => {
 
         // Nine played, so two of the three open players can still be on the pitch
         expect(decomposition.ownStartersLeft).toBe(2)
+        expect(decomposition.ownOpen).toHaveLength(3)
+        expect(decomposition.ownFieldable).toBe(2)
         expect(decomposition.rivalStartersLeft).toBe(LINEUP_SIZE - 1)
+    })
+
+    it("has nothing fieldable once eleven players have scored", () => {
+        // The regular end of a match day: the eleven are done, the bench is still "open"
+        const eleven = Array.from({ length: 11 }, (unused, index) => player(`o${index}`, 5))
+        const decomposition = decomposeSwing({
+            ownPlayers: [...eleven, player("bank1", 0), player("bank2", 0)],
+            rivalPlayers: [player("r1", 5)],
+            phase: RUNNING,
+        })
+
+        expect(decomposition.ownOpen).toHaveLength(2)
+        expect(decomposition.ownFieldable).toBe(0)
     })
 
     it("never reports negative room in the lineup", () => {
         const twelve = Array.from({ length: 12 }, (unused, index) => player(`o${index}`, 5))
         const decomposition = decomposeSwing({ ownPlayers: twelve, rivalPlayers: [], phase: RUNNING })
         expect(decomposition.ownStartersLeft).toBe(0)
+        expect(decomposition.ownFieldable).toBe(0)
     })
 
     it("has an all-open, zero gap before the match day starts", () => {
@@ -217,7 +260,7 @@ describe("swingBounds", () => {
 
     it("spans the gap by what the open differentials could add", () => {
         const bounds = swingBounds(decomposition, 10)
-        expect(bounds).toMatchObject({ ownCount: 2, rivalCount: 1, ownSwing: 20, rivalSwing: 10 })
+        expect(bounds).toMatchObject({ ownSwing: 20, rivalSwing: 10 })
         expect(bounds.ceiling).toBe(2)
         expect(bounds.floor).toBe(-28)
     })
@@ -230,9 +273,9 @@ describe("swingBounds", () => {
             phase: RUNNING,
         })
 
-        // Three open players, but only two of them can be fielded
-        expect(swingBounds(crowded, 10).ownCount).toBe(2)
-        // 45 own points against 5, plus the two players still allowed on the pitch
+        // Three open players, but only two of them can be fielded: 45 own points against 5,
+        // plus the two players still allowed on the pitch
+        expect(swingBounds(crowded, 10).ownSwing).toBe(20)
         expect(swingBounds(crowded, 10).ceiling).toBe(40 + 20)
     })
 
@@ -241,13 +284,20 @@ describe("swingBounds", () => {
         const bounds = swingBounds(decomposition, null)
         expect(bounds.ceiling).toBeNull()
         expect(bounds.floor).toBeNull()
-        expect(bounds.ownCount).toBe(2)
+        expect(bounds.ownSwing).toBeNull()
     })
 })
 
 describe("swingHeadline", () => {
-    const headline = (gap, ownOpen, rivalOpen) => swingHeadline(
-        { gap, ownOpen: new Array(ownOpen).fill(player("x", 0)), rivalOpen: new Array(rivalOpen).fill(player("y", 0)) },
+    // The banner counts what can still be fielded, the same number the bars use
+    const headline = (gap, ownOpen, rivalOpen, ownFieldable = ownOpen, rivalFieldable = rivalOpen) => swingHeadline(
+        {
+            gap,
+            ownOpen: new Array(ownOpen).fill(player("x", 0)),
+            rivalOpen: new Array(rivalOpen).fill(player("y", 0)),
+            ownFieldable,
+            rivalFieldable,
+        },
         { rivalName: "Max" })
 
     it("names the direction and what is left", () => {
@@ -259,9 +309,20 @@ describe("swingHeadline", () => {
         expect(headline(-1, 1, 0)).toBe("Du liegst 1 Punkt hinter Max – einer deiner Spieler spielt noch")
     })
 
-    it("says so when the gap is settled", () => {
-        expect(headline(-18, 0, 0)).toBe("Du liegst 18 Punkte hinter Max – kein Spieler spielt noch")
-        expect(headline(0, 0, 0)).toBe("Gleichstand mit Max – kein Spieler spielt noch")
+    it("says the gap is settled once nothing can be fielded any more", () => {
+        expect(headline(-18, 0, 0)).toBe("Du liegst 18 Punkte hinter Max – kein Spieler kann noch punkten")
+        expect(headline(0, 0, 0)).toBe("Gleichstand mit Max – kein Spieler kann noch punkten")
+        // The regular end of a match day: three open players, all of them on the bench. The
+        // bars below the banner say zero, so the banner must not promise three.
+        expect(headline(-18, 3, 2, 0, 0)).toBe("Du liegst 18 Punkte hinter Max – kein Spieler kann noch punkten")
+    })
+
+    it("says höchstens where the squad has more open players than the lineup has room for", () => {
+        expect(headline(-18, 3, 0, 2, 0))
+            .toBe("Du liegst 18 Punkte hinter Max – höchstens 2 deiner 3 offenen Spieler können noch spielen")
+        expect(headline(-18, 3, 0, 1, 0))
+            .toBe("Du liegst 18 Punkte hinter Max – höchstens 1 deiner 3 offenen Spieler kann noch spielen")
+        expect(headline(4, 0, 4, 0, 2)).toBe("Du liegst 4 Punkte vor Max – höchstens 2 von 4 bei Max")
     })
 
     it("mentions the rival's open players even when none of yours are left", () => {

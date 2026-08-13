@@ -91,32 +91,70 @@ const SwingBar = ({ label, value, hint, color, scale }) => (
     </Box>
 )
 
-// An open player: name, and the status icon where Kickbase says something about him. An
-// injured player counts in the arithmetic like any other, because whether he is fielded is
-// not observable either way — but it is worth seeing.
-const PlayerChips = ({ players, emptyLabel }) => {
+// Which of the open players are on the bench is not observable, only how many of them can
+// still be fielded. The list therefore stays complete and says so, rather than dropping
+// players it cannot name or counting ones that cannot play.
+const benchNote = (open, fieldable) => {
+    if (fieldable === open.length)
+        return null
+
+    if (fieldable === 0)
+        return `Elf Spieler haben gepunktet – die ${open.length} offenen sitzen auf der Bank und bewegen nichts mehr.`
+
+    return `Höchstens ${fieldable} von ${open.length} können noch aufgestellt sein – welche, steht nicht in den Daten.`
+}
+
+// One open player as a chip: name, plus the status icon where Kickbase says something about
+// him. An injured player counts in the arithmetic like any other, because whether he is
+// fielded is not observable either way — but it is worth seeing.
+const PlayerChips = ({ players, fieldable, emptyLabel }) => {
     if (players.length === 0)
         return <Typography variant="caption" sx={{ color: "text.secondary" }}>{emptyLabel}</Typography>
 
-    return (
-        <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap" }}>
-            {players.map((player) => {
-                const status = player.status === null || player.status === 0 ? null : getStatusIcon(player.status)
+    const note = benchNote(players, fieldable)
 
-                return (
-                    <Chip
-                        key={player.playerId}
-                        size="small"
-                        variant="outlined"
-                        label={player.name}
-                        icon={status
-                            ? <Tooltip title={status.tooltip}><Box sx={{ display: "flex" }}>{status.icon}</Box></Tooltip>
-                            : undefined}
-                    />
-                )
-            })}
-        </Stack>
+    return (
+        <>
+            <Stack direction="row" spacing={0.5} useFlexGap sx={{ flexWrap: "wrap" }}>
+                {players.map((player) => {
+                    const status = player.status === null || player.status === 0 ? null : getStatusIcon(player.status)
+
+                    return (
+                        <Chip
+                            key={player.playerId}
+                            size="small"
+                            variant="outlined"
+                            label={player.name}
+                            sx={fieldable === 0 ? { opacity: 0.5 } : undefined}
+                            icon={status
+                                ? <Tooltip title={status.tooltip}><Box sx={{ display: "flex" }}>{status.icon}</Box></Tooltip>
+                                : undefined}
+                        />
+                    )
+                })}
+            </Stack>
+            {note && <Typography variant="caption" sx={{ color: "text.secondary" }}>{note}</Typography>}
+        </>
     )
+}
+
+// How many of the open players can still matter, in the words the bars use. "Höchstens"
+// wherever the lineup has less room than the squad has open players.
+const differentialHint = (fieldable, open, subject, reference) => {
+    if (fieldable === 0) {
+        return open.length > 0
+            ? `Keiner ${subject} kann noch punkten – ${open.length} offene sitzen auf der Bank.`
+            : `Keiner ${subject} kann noch punkten.`
+    }
+
+    const who = fieldable === open.length
+        ? `${fieldable} ${subject}`
+        : `Höchstens ${fieldable} von ${open.length} ${subject}`
+    const verb = fieldable === 1 ? "kann" : "können"
+
+    return reference
+        ? `${who} ${verb} noch punkten, hochgerechnet mit dem Spieltags-Ø.`
+        : `${who} ${verb} noch punkten. Ein Richtwert je Spieler fehlt noch.`
 }
 
 /**
@@ -189,6 +227,10 @@ function SwingMeter({ entries }) {
         ? new Date(timestampLivePoints.time).toLocaleString("de-DE")
         : "unbekannt"
 
+    const sharedNames = decomposition.shared
+        .map((player) => player.points ? `${player.name} (${player.points})` : player.name)
+        .join(", ")
+
     return (
         <Paper variant="outlined" sx={{ padding: "15px", marginBottom: "20px" }}>
             <Stack direction="row" spacing={2} sx={{ flexWrap: "wrap", alignItems: "center", marginBottom: "15px" }}>
@@ -252,31 +294,29 @@ function SwingMeter({ entries }) {
                 />
 
                 <SwingBar
-                    label={`Geteilt, läuft noch (falls aufgestellt) – ${decomposition.shared.length} Spieler`}
+                    label={`Geteilt, hebt sich auf (falls aufgestellt) – ${decomposition.shared.length} Spieler`}
                     value={0}
                     hint={decomposition.shared.length === 0
                         ? "In Kickbase gehört ein Spieler nur einem Manager, deshalb ist dieser Teil normalerweise leer."
-                        : `Auf beiden Kadern: ${decomposition.shared.map((player) => player.name).join(", ")}. Punkte heben sich auf – falls beide ihn aufgestellt haben.`}
+                        : `Auf beiden Kadern: ${sharedNames}. Weder Punkte noch Potenzial zählen, weil nicht feststeht, wem sie gehören.`}
                     color="text.disabled"
                     scale={scale}
                 />
 
                 <SwingBar
-                    label={`Differential, läuft noch (falls aufgestellt) – ${bounds.ownCount} für dich`}
+                    label={`Differential, läuft noch (falls aufgestellt) – ${decomposition.ownFieldable} für dich`}
                     value={bounds.ownSwing ?? 0}
-                    hint={bounds.ownSwing === null
-                        ? `${bounds.ownCount} deiner Spieler können noch punkten. Ein Richtwert je Spieler fehlt noch.`
-                        : `${bounds.ownCount} deiner Spieler können noch punkten, hochgerechnet mit dem Spieltags-Ø.`}
+                    hint={differentialHint(
+                        decomposition.ownFieldable, decomposition.ownOpen, "deiner Spieler", bounds.ownSwing !== null)}
                     color="success.main"
                     scale={scale}
                 />
 
                 <SwingBar
-                    label={`Differential, läuft noch (falls aufgestellt) – ${bounds.rivalCount} für ${rivalName}`}
+                    label={`Differential, läuft noch (falls aufgestellt) – ${decomposition.rivalFieldable} für ${rivalName}`}
                     value={bounds.rivalSwing === null ? 0 : -bounds.rivalSwing}
-                    hint={bounds.rivalSwing === null
-                        ? `${bounds.rivalCount} Spieler von ${rivalName} können noch punkten. Ein Richtwert je Spieler fehlt noch.`
-                        : `${bounds.rivalCount} Spieler von ${rivalName} können noch punkten, hochgerechnet mit dem Spieltags-Ø.`}
+                    hint={differentialHint(
+                        decomposition.rivalFieldable, decomposition.rivalOpen, `der Spieler von ${rivalName}`, bounds.rivalSwing !== null)}
                     color="error.main"
                     scale={scale}
                 />
@@ -287,24 +327,38 @@ function SwingMeter({ entries }) {
             <Typography variant="body2">
                 {bounds.ceiling === null
                     ? "Für eine Spanne haben noch zu wenige Spieler gepunktet."
-                    : `Spanne: von ${pointsFormatter.format(bounds.floor)} bis ${pointsFormatter.format(bounds.ceiling)} Punkten, wenn jeder noch offene Spieler den Spieltags-Ø von ${averageFormatter.format(pointsPerPlayer)} Punkten holt.`}
+                    : bounds.ceiling === bounds.floor
+                        // Both sides have their eleven behind them: a "von +25 bis +25" would
+                        // read as a range where there is none
+                        ? "Der Abstand steht fest – es kann sich nichts mehr bewegen."
+                        : `Spanne: von ${pointsFormatter.format(bounds.floor)} bis ${pointsFormatter.format(bounds.ceiling)} Punkten, wenn jeder noch offene Spieler den Spieltags-Ø von ${averageFormatter.format(pointsPerPlayer)} Punkten holt.`}
             </Typography>
 
             <Box sx={{ marginTop: "12px" }}>
                 <Typography variant="subtitle2">Deine offenen Spieler</Typography>
-                <PlayerChips players={decomposition.ownOpen} emptyLabel="Keiner deiner Spieler spielt noch." />
+                <PlayerChips
+                    players={decomposition.ownOpen}
+                    fieldable={decomposition.ownFieldable}
+                    emptyLabel="Keiner deiner Spieler spielt noch."
+                />
             </Box>
 
             <Box sx={{ marginTop: "12px" }}>
                 <Typography variant="subtitle2">{rivalName}: offene Spieler (falls aufgestellt)</Typography>
-                <PlayerChips players={decomposition.rivalOpen} emptyLabel={`Kein Spieler von ${rivalName} spielt noch.`} />
+                <PlayerChips
+                    players={decomposition.rivalOpen}
+                    fieldable={decomposition.rivalFieldable}
+                    emptyLabel={`Kein Spieler von ${rivalName} spielt noch.`}
+                />
             </Box>
 
             <Typography variant="caption" component="div" sx={{ color: "text.secondary", marginTop: "12px" }}>
                 Ehrlichkeitshinweise: Die Aufstellung des Rivalen steht nicht in der API – offene Spieler zählen nur,
-                falls sie aufgestellt sind, und ein Manager stellt höchstens elf auf. Ein Spieler ohne Punkte gilt als
-                „spielt noch“; wer gespielt und 0 Punkte geholt hat, ist in den Daten nicht davon zu unterscheiden.
-                Spanne und Balken rechnen mit dem Spieltags-Durchschnitt, nicht mit Wahrscheinlichkeiten.
+                falls sie aufgestellt sind, und ein Manager stellt höchstens elf auf. Haben schon elf gepunktet, sitzt
+                der Rest auf der Bank und bewegt nichts mehr – welche Spieler das sind, ist nicht zu erkennen. Ein
+                Spieler ohne Punkte gilt als „spielt noch“; wer gespielt und 0 Punkte geholt hat, ist in den Daten nicht
+                davon zu unterscheiden. Spanne und Balken rechnen mit dem Spieltags-Durchschnitt, nicht mit
+                Wahrscheinlichkeiten.
             </Typography>
         </Paper>
     )
