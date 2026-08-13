@@ -165,7 +165,18 @@ def check_children(children: list, now: float) -> list:
         if not child.may_restart(now):
             continue
 
-        child.restart(now)
+        ### Popen itself can fail - an OSError on fork under memory pressure is not exotic
+        ### in a container running Node and Python side by side. Letting that out would
+        ### end the one process whose entire job is to survive its children dying. The
+        ### counters were already advanced by restart(), so the backoff applies to the
+        ### next attempt just as it would after a normal restart.
+        try:
+            child.restart(now)
+        except Exception as e:
+            logging.error(f"Could not restart {child.name}: {type(e).__name__}: {e}. "
+                          f"Leaving it down and trying again in {child.backoff_seconds()}s.")
+            continue
+
         restarted.append(child)
 
     return restarted
@@ -175,8 +186,11 @@ def notify(title: str, message: str, colour: int, webhook: str) -> None:
     """### Send a Discord message without letting a webhook problem end the run.
 
     The alert is the last thing standing between a broken deployment and nobody noticing.
-    It is not worth taking the supervisor down over, which is what an unhandled
-    NotificatonException from the notifier itself would do.
+    It is not worth taking the supervisor down over.
+
+    Caught broadly rather than as NotificatonException. Today that is the only type
+    discord_notification() lets out, but the promise made here - the supervisor survives
+    a notification problem - should not quietly depend on a property of another module.
 
     Args:
         title (str): Embed title.
@@ -190,8 +204,8 @@ def notify(title: str, message: str, colour: int, webhook: str) -> None:
 
     try:
         miscellaneous.discord_notification(title, message, colour, webhook)
-    except exceptions.NotificatonException as e:
-        logging.error(f"Could not send the Discord alert '{title}': {e}")
+    except Exception as e:
+        logging.error(f"Could not send the Discord alert '{title}': {type(e).__name__}: {e}")
 
 
 def describe_failed_run(manifest: dict) -> str:

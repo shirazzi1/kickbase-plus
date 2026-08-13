@@ -55,33 +55,55 @@ STALENESS_SLACK = timedelta(hours=1)
 ### restarts a container that was fine.
 FALLBACK_MAX_AGE = timedelta(hours=12)
 
+### How far to walk a cron expression before deciding what its longest gap is. A week
+### covers the weekday expressions; the count caps an expression that fires every minute,
+### where a week would be ten thousand steps and the answer is obvious after twenty.
+SCHEDULE_CYCLE = timedelta(days=7)
+MAX_SCHEDULE_FIRES = 200
+
 
 def expected_run_interval(schedule: str = None) -> timedelta:
-    """### How long the configured schedule leaves between two runs.
+    """### The longest gap the configured schedule leaves between two runs.
 
     Read off the cron expression rather than configured separately, so changing
     RUN_SCHEDULE moves the staleness threshold with it instead of quietly invalidating it.
+
+    The *longest* gap, not the first one. Those are the same number only for an evenly
+    spaced expression, and RUN_SCHEDULE is documented as free to set. `0 8,12,20 * * *` -
+    morning, midday, evening - has a first gap of 4 hours and a real longest gap of 12,
+    overnight. Measuring the first one would have reported that container as stale every
+    night from about 05:00 until the 08:00 run finished, with nothing whatsoever wrong.
 
     Args:
         schedule (str): A cron expression. Defaults to RUN_SCHEDULE.
 
     Returns:
-        timedelta: The gap between the next two runs, or the fallback if the expression
-            cannot be read.
+        timedelta: The longest gap between two consecutive runs, or the fallback if the
+            expression cannot be read.
     """
     expression = schedule or getenv("RUN_SCHEDULE", DEFAULT_RUN_SCHEDULE)
 
     try:
         from croniter import croniter
 
-        ### A fixed base, so the answer does not depend on when this is asked. The gap
-        ### between two fires is what matters, not which two.
+        ### A fixed base in UTC, so the answer does not depend on when this is asked.
+        ### DST is not modelled: it can shift one gap by an hour twice a year, which is
+        ### what STALENESS_SLACK is there to absorb.
         base = datetime(2026, 1, 1, tzinfo=timezone.utc)
         cron = croniter(expression, base)
-        first = cron.get_next(datetime)
-        second = cron.get_next(datetime)
 
-        return second - first
+        fires = []
+        while len(fires) < MAX_SCHEDULE_FIRES:
+            fires.append(cron.get_next(datetime))
+
+            ### One full cycle is enough to have seen every gap the expression produces
+            if fires[-1] - fires[0] >= SCHEDULE_CYCLE:
+                break
+
+        if len(fires) < 2:
+            raise ValueError("the expression produced fewer than two run times")
+
+        return max(later - earlier for earlier, later in zip(fires, fires[1:]))
     except Exception as e:
         logging.warning(f"Could not read RUN_SCHEDULE '{expression}': {e}. "
                         f"Falling back to {FALLBACK_MAX_AGE} for the staleness check.")

@@ -193,6 +193,35 @@ def test_the_backoff_is_capped():
         f"got {child.backoff_seconds()}"
 
 
+def test_a_restart_that_itself_fails_does_not_end_the_supervisor():
+    """Popen can raise - an OSError on fork under memory pressure is not exotic in a
+    container running Node and Python side by side. Letting it out would end the one
+    process whose entire job is to survive its children dying."""
+    def refuses_to_start(command, cwd=None):
+        raise OSError("Cannot allocate memory")
+
+    child = supervisor.Child("frontend", ["npm", "start"], launcher=refuses_to_start)
+    child.process = FakeProcess(exit_code=1)
+
+    restarted = supervisor.check_children([child], now=1000)
+
+    assert restarted == [], "a child that could not be started was reported as restarted"
+    assert child.restarts == 1, "the attempt still counts, so the backoff applies"
+
+
+def test_a_failed_restart_still_backs_off():
+    def refuses_to_start(command, cwd=None):
+        raise OSError("Cannot allocate memory")
+
+    child = supervisor.Child("frontend", ["npm", "start"], launcher=refuses_to_start)
+    child.process = FakeProcess(exit_code=1)
+
+    supervisor.check_children([child], now=1000)
+    supervisor.check_children([child], now=1001)
+
+    assert child.restarts == 1, f"the second attempt was too early, got {child.restarts}"
+
+
 def test_only_the_first_restarts_are_worth_a_message():
     """A child that dies every five minutes has already been reported."""
     child = supervisor.Child("frontend", ["npm", "start"], launcher=FakeLauncher())
@@ -282,17 +311,24 @@ def test_a_failure_after_a_recovery_is_announced_again():
 
 def test_a_broken_webhook_does_not_take_the_supervisor_down():
     """The alert is the last thing between a broken deployment and nobody noticing. It is
-    not worth ending the supervisor over."""
+    not worth ending the supervisor over - whatever shape the problem arrives in.
+
+    NotificatonException is the only type discord_notification() lets out today. The
+    promise made here should not quietly depend on that staying true, so a plain
+    RuntimeError has to be survivable as well.
+    """
     original = miscellaneous.discord_notification
 
-    def explode(*args, **kwargs):
-        raise exceptions.NotificatonException("Notification failed!")
+    for failure in (exceptions.NotificatonException("Notification failed!"),
+                    RuntimeError("something nobody predicted")):
+        def explode(*args, **kwargs):
+            raise failure
 
-    miscellaneous.discord_notification = explode
-    try:
-        supervisor.notify("t", "m", 0, "https://discord.test/hook")
-    finally:
-        miscellaneous.discord_notification = original
+        miscellaneous.discord_notification = explode
+        try:
+            supervisor.notify("t", "m", 0, "https://discord.test/hook")
+        finally:
+            miscellaneous.discord_notification = original
 
 
 def test_nothing_is_sent_without_a_webhook():
@@ -409,6 +445,76 @@ def test_staleness_follows_the_configured_schedule():
 
     assert hourly < four_hourly, f"hourly {hourly} vs four hourly {four_hourly}"
     assert four_hourly == timedelta(hours=9), f"got {four_hourly}"
+
+
+def longest_real_gap(expression, samples=400):
+    """The longest gap the expression actually produces, measured the slow honest way."""
+    from croniter import croniter
+
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    cron = croniter(expression, base)
+    fires = [cron.get_next(datetime) for _ in range(samples)]
+
+    return max(later - earlier for earlier, later in zip(fires, fires[1:]))
+
+
+def test_an_uneven_schedule_is_measured_by_its_longest_gap():
+    """`0 8,12,20 * * *` - morning, midday, evening - has a first gap of 4 hours and a
+    real gap of 12 overnight. Measuring the first one reported the container as stale
+    every night from about 05:00 until the 08:00 run finished, with nothing wrong.
+    """
+    threshold = health.max_run_age("0 8,12,20 * * *")
+
+    assert threshold >= timedelta(hours=12), \
+        f"the overnight gap is 12h, the threshold is {threshold}"
+
+
+def test_no_ordinary_schedule_reports_a_healthy_container_as_stale():
+    """The evenly spaced ones passed either way; the uneven ones are the point.
+
+    `30 6,12,18 * * *` used to come out at 13h against a real 12h and pass by luck, which
+    is worse than failing: trying one expression told you nothing about the next.
+    """
+    schedules = [
+        "10 2,6,10,14,18,22 * * *",  # the default
+        "0 8,12,20 * * *",           # morning, midday, evening
+        "0 6,7 * * *",               # twice, an hour apart
+        "0 7,8,9 * * *",             # three times, an hour apart
+        "30 6,12,18 * * *",          # the one that used to pass by accident
+        "0 * * * *",                 # hourly
+        "*/5 * * * *",               # every five minutes
+        "0 3 * * 1",                 # weekly
+    ]
+
+    too_tight = []
+    for expression in schedules:
+        threshold = health.max_run_age(expression)
+        real = longest_real_gap(expression)
+
+        if threshold < real:
+            too_tight.append(f"{expression}: threshold {threshold} < real gap {real}")
+
+    assert too_tight == [], f"these would report a healthy container as stale: {too_tight}"
+
+
+def test_a_schedule_that_fires_constantly_does_not_hang_the_check():
+    """A week of "every minute" is ten thousand steps, and the answer is obvious after
+    twenty. The health endpoint has a ten second timeout in the Dockerfile."""
+    import time
+
+    started = time.perf_counter()
+    threshold = health.max_run_age("* * * * *")
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 1.0, f"took {elapsed:.2f}s"
+    assert threshold < timedelta(hours=2), f"got {threshold}"
+
+
+def test_a_monthly_schedule_is_not_walked_for_a_full_week_of_fires():
+    """The cycle is a week, but a monthly expression steps past it in two fires."""
+    threshold = health.max_run_age("0 4 1 * *")
+
+    assert threshold >= timedelta(days=28), f"got {threshold}"
 
 
 def test_an_unreadable_schedule_falls_back_generously():
@@ -607,6 +713,8 @@ if __name__ == "__main__":
     check("a crash loop backs off", test_a_crash_loop_backs_off_instead_of_spinning)
     check("the backoff lets go once it has waited", test_the_backoff_lets_go_once_it_has_waited)
     check("the backoff is capped", test_the_backoff_is_capped)
+    check("a restart that itself fails does not end the supervisor", test_a_restart_that_itself_fails_does_not_end_the_supervisor)
+    check("a failed restart still backs off", test_a_failed_restart_still_backs_off)
     check("only the first restarts are worth a message", test_only_the_first_restarts_are_worth_a_message)
 
     print("\nalerting on a run")
@@ -628,6 +736,10 @@ if __name__ == "__main__":
     check("a missing manifest is unhealthy", test_a_missing_manifest_is_unhealthy)
     check("an unreadable manifest is unhealthy", test_an_unreadable_manifest_is_unhealthy)
     check("staleness follows the configured schedule", test_staleness_follows_the_configured_schedule)
+    check("an uneven schedule is measured by its longest gap", test_an_uneven_schedule_is_measured_by_its_longest_gap)
+    check("no ordinary schedule reports a healthy container as stale", test_no_ordinary_schedule_reports_a_healthy_container_as_stale)
+    check("a constant schedule does not hang the check", test_a_schedule_that_fires_constantly_does_not_hang_the_check)
+    check("a monthly schedule is not walked for a full week", test_a_monthly_schedule_is_not_walked_for_a_full_week_of_fires)
     check("an unreadable schedule falls back generously", test_an_unreadable_schedule_falls_back_generously)
     check("a stale run is stale even with every stage ok", test_a_stale_run_is_reported_as_stale_even_when_every_stage_was_ok)
     check("the report says how old the run is", test_the_report_says_how_old_the_run_is)
