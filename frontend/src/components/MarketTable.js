@@ -11,10 +11,11 @@ import {
     deltaColumnStyles,
     getStatusIcon
 } from "./SharedConstants"
-import { relativeChange, daysToBreakEven } from "./marketFormulas"
+import { relativeChange, daysToBreakEven, breakEvenBid } from "./marketFormulas"
 
 // Import data
 import data from "../data/market.json"
+import config from "../data/config.json"
 
 const daysFormatter = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 })
 
@@ -231,9 +232,18 @@ function MarketTable() {
             // What the asking price adds on top of the current market value. Always 0 for
             // free agents, where Kickbase asks exactly the market value.
             markup: row.marketValue ? row.price / row.marketValue - 1 : null,
-            // Days for the market value to grow into the asking price at the pace of the
-            // last three days
+            // Addresses the row for the bid endpoints
+            playerId: row.playerId,
+            // Nobody bids on their own listing
+            isOwnListing: row.isOwnListing,
+            // The pace both break-even figures come from, averaged in the backend over
+            // BEP_GROWTH_DAYS
+            avgDailyGrowth: row.avgDailyGrowth,
+            // Days for the market value to grow into the asking price at that pace
             daysToBep: daysToBreakEven(row),
+            // The bid that would break even after BEP_TARGET_DAYS days. Kept apart from
+            // ownBid so the column still sorts by the real bid.
+            suggestedBid: breakEvenBid(row, config.bepTargetDays),
             ownBid: row.ownBid,
             today: row.today,
             todayPercent: relativeChange(row.today, row.marketValue),
