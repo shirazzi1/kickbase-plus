@@ -103,11 +103,14 @@ def get_market(token: str, league_id: str):
     ### Send GET request to get all free players in the given league
     try:
         json_response = requests.get(url, headers=headers).json()
+        ### Create a new object for every entry in the json_response["it"] list. Kept
+        ### inside the try: a response with no "it" key (an expired token, seen live) is
+        ### as much a failed read as the request itself, and both callers of this
+        ### function - app.py and main.py - need one exception to handle, not a request
+        ### failure here and a bare KeyError there.
+        players_on_market = [Market_Players(player) for player in json_response["it"]]
     except:
         raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") # TODO: Change exception
-    
-    ### Create a new object for every entry in the json_response["it"] list.
-    players_on_market = [Market_Players(player) for player in json_response["it"]]
 
     return players_on_market
 

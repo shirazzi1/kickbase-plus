@@ -124,6 +124,36 @@ def _check_bid_token():
     return None
 
 
+### Shown whenever a write may have already gone through but the confirmation could not
+### be read back. Deliberately neither a success nor an ordinary failure: Kickbase's own
+### state is unknown from here, and guessing wrong in either direction is worse than
+### saying so. Points at the Kickbase app rather than at a retry, because retrying an
+### action that already went through is exactly what this message exists to prevent.
+BID_UNCONFIRMED_MESSAGE = ("Kickbase hat die Aktion möglicherweise bereits verarbeitet, die "
+                           "Bestätigung ist aber fehlgeschlagen. Bitte prüfe die Kickbase-App, "
+                           "bevor du erneut bietest.")
+
+
+def _unconfirmed(context: str):
+    """### The one response for "maybe done, but we could not confirm it".
+
+    Shared by every place a write can end up in this state: the read-back after
+    `place_offer` raising outright, that same read-back showing no trace of the bid just
+    placed, and the read-back after `remove_offer` still showing the offer it was
+    supposed to remove. The caller must not patch market.json when it reaches here - a
+    value that could not be confirmed is worse to write than a stale file - and this is
+    what keeps the message identical across all three call sites.
+
+    Args:
+        context (str): What was being confirmed, for the log line only.
+
+    Returns:
+        A (response, status) tuple to return directly from the view function.
+    """
+    logging.error(f"Flask API: could not confirm {context}.")
+    return jsonify({"error": BID_UNCONFIRMED_MESSAGE}), 502
+
+
 @app.route("/api/market/<player_id>/bid", methods=["POST"])
 def place_bid(player_id):
     """### Places a bid on a player on the transfer market.
@@ -158,9 +188,19 @@ def place_bid(player_id):
 
         leagues.place_offer(user_token, selected_league.id, player_id, price)
 
-        ### Read back what Kickbase recorded, rather than trusting what we sent
-        confirmed = _listing(user_token, selected_league.id, player_id)
+        ### Read back what Kickbase recorded, rather than trusting what we sent. Kickbase
+        ### already accepted the write above, so a read-back that raises, or one that
+        ### shows no trace of this bid, means the *confirmation* failed - not the bid.
+        ### Guessing "no bid" here would be exactly as wrong as guessing "yes", so neither
+        ### branch below patches market.json or reports success.
+        try:
+            confirmed = _listing(user_token, selected_league.id, player_id)
+        except exceptions.NotificatonException:
+            return _unconfirmed(f"the bid on player {player_id}")
+
         own_bid = confirmed.own_offer(user_info.id) if confirmed else None
+        if own_bid is None:
+            return _unconfirmed(f"the bid on player {player_id}")
 
         miscellaneous.patch_market_bid(player_id, own_bid)
     except exceptions.KickbaseWriteException as e:
@@ -204,6 +244,18 @@ def withdraw_bid(player_id):
 
         ### The user's own id is the offer's identifier - Kickbase exposes no offer id
         leagues.remove_offer(user_token, selected_league.id, player_id, user_info.id)
+
+        ### Symmetric with the POST above: read back to confirm the offer is actually
+        ### gone rather than trusting the 200. An idempotent 200, or the seller accepting
+        ### the offer between the pre-read above and this DELETE, can both leave it
+        ### standing - and reporting it gone either way is exactly the wrong guess.
+        try:
+            confirmed = _listing(user_token, selected_league.id, player_id)
+        except exceptions.NotificatonException:
+            return _unconfirmed(f"the withdrawal on player {player_id}")
+
+        if confirmed is not None and confirmed.own_offer(user_info.id) is not None:
+            return _unconfirmed(f"the withdrawal on player {player_id}")
 
         miscellaneous.patch_market_bid(player_id, None)
     except exceptions.KickbaseWriteException as e:

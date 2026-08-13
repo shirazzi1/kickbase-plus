@@ -547,6 +547,27 @@ def bid_market():
                               "uop": 5200000}])]
 
 
+def market_then(first, second):
+    """A market() fake answering `first` once, then `second` for every call after.
+
+    Both write endpoints call get_market() twice per request now - once before the write
+    to check the current state, once as the read-back that confirms it - and several
+    tests need those two calls to answer differently. `second` (or `first`) may be a
+    callable returning rows, or an exception instance to raise instead.
+    """
+    calls = []
+
+    def market():
+        calls.append(None)
+        step = first if len(calls) == 1 else second
+
+        if isinstance(step, Exception):
+            raise step
+        return step()
+
+    return market
+
+
 def test_post_rejects_a_non_positive_price():
     status, body, _ = post_bid(plain_market, 0)
     assert status == 400, f"expected 400, got {status} {body}"
@@ -603,10 +624,14 @@ def test_post_passes_the_kickbase_rejection_through():
 
 def test_delete_withdraws_and_reports_no_bid():
     removed = []
+    ### The pre-check must see the offer (else the endpoint would 409 before ever calling
+    ### remove_offer); the read-back that follows the actual removal must not, since that
+    ### is what a real successful withdrawal looks like once Kickbase applied it.
+    market = market_then(bid_market, plain_market)
     ### Seeded with a pre-existing bid, so the ownBid-cleared assertion below proves the
     ### withdrawal actually happened rather than the row having started out empty.
     client, original, data_dir = client_with(
-        bid_market, remove=lambda *a, **k: removed.append(a),
+        market, remove=lambda *a, **k: removed.append(a),
         market_rows=[dict(bid_row(), ownBid=5200000)])
     try:
         response = client.delete(f"/api/market/{PLAYER_ID}/bid", headers=bid_headers())
@@ -627,6 +652,83 @@ def test_delete_without_a_bid_is_a_conflict():
         response = client.delete(f"/api/market/{PLAYER_ID}/bid", headers=bid_headers())
         assert response.status_code == 409, \
             f"expected 409, got {response.status_code} {response.get_json()}"
+    finally:
+        restore(original)
+
+
+### ===============================================================================
+### Confirming a write - Kickbase accepted it, but the interface must not guess
+### ===============================================================================
+###
+### All three tests below share one shape: a write that Kickbase accepted, followed by a
+### read-back that cannot confirm it (raises, or shows a state inconsistent with the
+### write having landed). None of the three may report success, none may patch
+### market.json, and all three must send the user to the Kickbase app instead of
+### inviting a retry on an action that may already have gone through.
+
+
+def test_post_read_back_failure_does_not_confirm_the_bid():
+    """Finding 1: place_offer succeeds, but the read-back that follows it raises.
+
+    Reproduces the live bug: get_market() raises exceptions.NotificatonException, which
+    subclasses Exception rather than exceptions.KickbaseException, so neither endpoint's
+    handler used to catch it and Flask answered a bare 500 while the bid stood.
+    """
+    market = market_then(plain_market, exceptions.NotificatonException("boom"))
+    status, body, own_bid_in_file = post_bid(market, 1180000)
+
+    assert status == 502, f"expected 502, got {status} {body}"
+    assert "Kickbase-App" in body.get("error", ""), \
+        f"expected a message pointing at the Kickbase app, got {body}"
+    assert "bevor du erneut bietest" in body.get("error", ""), \
+        f"expected a warning against bidding again, got {body}"
+    assert own_bid_in_file is None, \
+        f"expected market.json left untouched, got ownBid={own_bid_in_file!r}"
+
+
+def test_post_read_back_with_no_own_offer_does_not_confirm_the_bid():
+    """Finding 2: place_offer succeeds, but the read-back shows no offer of ours.
+
+    Before the fix this fell through as ownBid=null with HTTP 200 - byte-identical to
+    what a successful withdrawal reports - and market.json was patched to null even
+    though Kickbase had just accepted the bid.
+    """
+    status, body, own_bid_in_file = post_bid(plain_market, 1180000)
+
+    assert status == 502, f"expected 502, got {status} {body}"
+    assert "ownBid" not in body, \
+        f"a placement must never answer with ownBid here, got {body}"
+    assert "Kickbase-App" in body.get("error", ""), \
+        f"expected a message pointing at the Kickbase app, got {body}"
+    assert "bevor du erneut bietest" in body.get("error", ""), \
+        f"expected a warning against bidding again, got {body}"
+    assert own_bid_in_file is None, \
+        f"expected market.json left untouched, got ownBid={own_bid_in_file!r}"
+
+
+def test_delete_read_back_showing_the_offer_survived_does_not_confirm_the_withdrawal():
+    """Finding 3: remove_offer answers success, but the read-back still shows our offer.
+
+    Before the fix DELETE never read back at all: it patched market.json to null and
+    answered {"ownBid": null} unconditionally, even if an idempotent 200 or a seller
+    accepting the offer between the pre-read and the DELETE left it standing.
+    """
+    removed = []
+    client, original, data_dir = client_with(
+        bid_market, remove=lambda *a, **k: removed.append(a),
+        market_rows=[dict(bid_row(), ownBid=5200000)])
+    try:
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid", headers=bid_headers())
+        body = response.get_json()
+
+        assert response.status_code == 502, f"expected 502, got {response.status_code} {body}"
+        assert "Kickbase-App" in body.get("error", ""), \
+            f"expected a message pointing at the Kickbase app, got {body}"
+        assert "bevor du erneut bietest" in body.get("error", ""), \
+            f"expected a warning against bidding again, got {body}"
+        assert removed, "expected remove_offer to have been called"
+        assert read_own_bid(data_dir) == 5200000, \
+            f"expected market.json left untouched, got ownBid={read_own_bid(data_dir)!r}"
     finally:
         restore(original)
 
@@ -772,6 +874,14 @@ if __name__ == "__main__":
     print("\nDELETE /api/market/<id>/bid")
     check("withdraws and reports no bid", test_delete_withdraws_and_reports_no_bid)
     check("is a conflict without a bid", test_delete_without_a_bid_is_a_conflict)
+
+    print("\nConfirming a write")
+    check("POST read-back failure does not confirm the bid",
+          test_post_read_back_failure_does_not_confirm_the_bid)
+    check("POST read-back with no own offer does not confirm the bid",
+          test_post_read_back_with_no_own_offer_does_not_confirm_the_bid)
+    check("DELETE read-back showing the offer survived does not confirm the withdrawal",
+          test_delete_read_back_showing_the_offer_survived_does_not_confirm_the_withdrawal)
 
     print("\nCORS")
     check("cross-origin preflight grants no origin",
