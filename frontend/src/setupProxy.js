@@ -10,11 +10,16 @@ const { createProxyMiddleware } = require("http-proxy-middleware")
 // token a secret in name only. Reading process.env.BID_TOKEN here means it never leaves
 // this process - the browser sends no token at all, and the proxy adds it before the
 // request reaches Flask on port 5000.
+//
+// The target is 127.0.0.1, not localhost: on macOS "localhost" can resolve to ::1
+// first, where the AirPlay Receiver already answers on port 5000 with a 403 - a
+// pre-existing trap the old "proxy" string in package.json had too, not something new
+// here.
 module.exports = function (app) {
     app.use(
         "/api",
         createProxyMiddleware({
-            target: "http://localhost:5000",
+            target: "http://127.0.0.1:5000",
             changeOrigin: true,
             onProxyReq: (proxyReq) => {
                 proxyReq.setHeader("X-Bid-Token", process.env.BID_TOKEN || "")

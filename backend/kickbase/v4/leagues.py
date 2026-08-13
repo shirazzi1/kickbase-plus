@@ -109,7 +109,7 @@ def get_market(token: str, league_id: str):
         ### function - app.py and main.py - need one exception to handle, not a request
         ### failure here and a bare KeyError there.
         players_on_market = [Market_Players(player) for player in json_response["it"]]
-    except:
+    except (requests.RequestException, ValueError, KeyError, TypeError):
         raise exceptions.NotificatonException("Notification failed! Please check your Discord Webhook URL.") # TODO: Change exception
 
     return players_on_market

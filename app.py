@@ -1,3 +1,4 @@
+import hmac
 import logging
 
 from os import getenv
@@ -107,7 +108,13 @@ def _check_bid_token():
 
     Fails closed: if BID_TOKEN is unset or empty, every request is refused rather than
     let through. An unset secret must never be silently read as "no check configured",
-    or removing the env var would turn the check off instead of tightening it.
+    or removing the env var would turn the check off instead of tightening it. That case
+    is a server misconfiguration, not a failed authentication - it answers 503 and never
+    names the environment variable to the browser, unlike a wrong or missing token, which
+    is the caller's mistake and stays 401.
+
+    The comparison against the configured token uses hmac.compare_digest() rather than
+    != so a byte-by-byte early exit cannot be timed from outside.
 
     Returns:
         A (response, status) tuple to return immediately if the request is rejected,
@@ -115,10 +122,12 @@ def _check_bid_token():
     """
     if not bid_token:
         logging.error("Flask API: BID_TOKEN is not set, refusing all bid requests.")
-        return jsonify({"error": "Der Server ist für Gebote nicht konfiguriert. Die "
-                                  "Umgebungsvariable BID_TOKEN muss gesetzt sein."}), 401
+        return jsonify({"error": "Der Server ist für Gebote derzeit nicht konfiguriert. "
+                                  "Bitte informiere die Person, die den Server "
+                                  "betreibt."}), 503
 
-    if request.headers.get("X-Bid-Token") != bid_token:
+    supplied_token = request.headers.get("X-Bid-Token", "")
+    if not hmac.compare_digest(supplied_token, bid_token):
         return jsonify({"error": "Ungültiges oder fehlendes Token für diese Aktion."}), 401
 
     return None

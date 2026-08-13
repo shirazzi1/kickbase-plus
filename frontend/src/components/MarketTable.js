@@ -58,7 +58,7 @@ function MarketTable() {
     // what shows a bid before the patched file has been picked up.
     const [bids, setBids] = useState({})
     const [error, setError] = useState(null)
-    const [confirming, setConfirming] = useState(null)   // { playerId, price }
+    const [confirming, setConfirming] = useState(null)   // { playerId, price, usedSuggestion }
 
     const closeEdit = () => setEdit(null)
 

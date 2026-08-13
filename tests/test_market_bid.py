@@ -809,7 +809,9 @@ def test_bid_token_unset_refuses_every_request_even_with_a_token():
     """Fail closed: an unset BID_TOKEN blocks every request rather than skipping the check.
 
     Otherwise unsetting the env var (e.g. a misconfigured deploy) would silently turn
-    the check off instead of tightening it.
+    the check off instead of tightening it. This is a server misconfiguration rather
+    than a failed authentication, so it answers 503, not 401 - see
+    test_wrong_token_is_401_while_unset_is_503 for why the two must stay distinct.
     """
     import app as flask_app
 
@@ -819,10 +821,41 @@ def test_bid_token_unset_refuses_every_request_even_with_a_token():
     try:
         response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
                                 headers={"X-Bid-Token": "any-token-at-all"})
-        assert response.status_code == 401, \
-            f"expected 401, got {response.status_code} {response.get_json()}"
+        assert response.status_code == 503, \
+            f"expected 503, got {response.status_code} {response.get_json()}"
+        assert "BID_TOKEN" not in response.get_json().get("error", ""), \
+            "the internal variable name should not be shown to the browser"
     finally:
         flask_app.bid_token = previous_token
+        restore(original)
+
+
+def test_wrong_token_is_401_while_unset_is_503():
+    """The two misconfiguration-shaped failures must not collapse into one status.
+
+    A wrong or missing token is the caller's mistake and stays 401; an unset BID_TOKEN
+    is the server's and is 503. Asserting both in one test stops a future edit from
+    quietly merging them back together.
+    """
+    import app as flask_app
+
+    client, original, _ = client_with(plain_market)
+    try:
+        wrong = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
+                             headers={"X-Bid-Token": "definitely-wrong"})
+        assert wrong.status_code == 401, \
+            f"expected 401 for a wrong token, got {wrong.status_code} {wrong.get_json()}"
+
+        previous_token = flask_app.bid_token
+        flask_app.bid_token = None
+        try:
+            unset = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
+                                 headers={"X-Bid-Token": "any-token-at-all"})
+            assert unset.status_code == 503, \
+                f"expected 503 for an unset token, got {unset.status_code} {unset.get_json()}"
+        finally:
+            flask_app.bid_token = previous_token
+    finally:
         restore(original)
 
 
@@ -897,6 +930,8 @@ if __name__ == "__main__":
           test_delete_with_the_wrong_token_is_unauthorized)
     check("BID_TOKEN unset refuses every request even with a token",
           test_bid_token_unset_refuses_every_request_even_with_a_token)
+    check("wrong token is 401 while unset is 503",
+          test_wrong_token_is_401_while_unset_is_503)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")
