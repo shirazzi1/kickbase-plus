@@ -39,3 +39,17 @@ LAST_GOOD_DIR = path.join(BASE_PATH, "data", "last-good")
 ### Shares the "data" parent with LAST_GOOD_DIR on purpose, so a single volume mount of
 ### /code/data makes everything that has to survive an image pull survive it.
 HISTORY_DIR = path.join(BASE_PATH, "data", "history")
+
+### Where the market value curves are kept between runs: one file per player, holding the
+### curve plus the token that says whether it is still current. See
+### backend/market_value_cache.py for the format and what invalidates an entry.
+###
+### Under "data" like the two above, and for a third reason: this one only pays off if it
+### survives the image pull. A cache that is empty on every start re-downloads the same 466
+### curves six times a day, which is exactly the traffic it exists to avoid.
+MARKET_VALUE_CACHE_DIR = path.join(BASE_PATH, "data", "market-values")
+
+### Where the ids of the teams in a competition are remembered, so the next run does not
+### have to find them by probing 97 ids to discover 18. One file per competition, refreshed
+### on a daily clock. See backend/kickbase/v4/competitions.py.
+TEAM_CACHE_DIR = path.join(BASE_PATH, "data", "teams")

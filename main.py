@@ -121,7 +121,7 @@ def build_stages(user_token: str, selected_league: object, own_user_id: str) -> 
         ("market", lambda: market(user_token, selected_league, own_user_id)),
         ("market_value_changes", lambda: market_value_changes(user_token, selected_league)),
         ("taken_free_players", lambda: taken_free_players(user_token, selected_league)),
-        ("balances", lambda: balances(user_token, selected_league)),
+        ("balances", lambda: balances(user_token, selected_league, own_user_id)),
         ("turnovers", lambda: turnovers(user_token, selected_league)),
         ("team_values", lambda: team_value_per_match_day(user_token, selected_league)),
         ("league_user_stats", lambda: league_user_stats_tables(user_token, selected_league)),
@@ -188,8 +188,12 @@ def main(manifest: runs.RunManifest = None) -> runs.RunManifest:
         return manifest
 
     ### Start every run with empty API caches, so a long lived process (app.py) never
-    ### serves data from a previous run
+    ### serves data from a previous run.
+    ###
+    ### Only the per-run caches. What lives under data/ - the market value curves and the
+    ### competition's team ids - is kept across runs on purpose, each on its own clock.
     leagues.clear_caches()
+    competitions.clear_caches()
 
     ### The login is not a stage. Every stage needs the token it returns, so there is
     ### nothing to isolate: without it the run has not begun.
@@ -324,8 +328,10 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
     the same decision for the user, so splitting them across two tables only meant
     comparing rows between them.
 
-    Each row also carries the user's own bid, whether the listing is the user's own,
-    the status note from the player profile, the daily market value deltas and the
+    Each row also carries the user's own bid, the seller's id (which the frontend
+    compares against the logged-in manager's own id to tell an own listing apart from
+    everyone else's, rather than this function answering that question itself), the
+    status note from the player profile, the daily market value deltas and the
     averaged growth over the configured window. The profile and market value history
     are both cached per run and this function runs before market_value_changes(),
     which asks for both for every player in the competition anyway, so this costs no
@@ -398,9 +404,15 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
             "marketValue": player.marketValue,
             "price": player.price,
             "ownBid": own_bid,
-            ### Nobody bids on their own listing, so the frontend locks the cell
-            "isOwnListing": player.userId is not None and str(player.userId) == str(own_user_id),
             "seller": player.username or "Kickbase",
+            ### Who to exclude from the bidders for this player. The display name alone
+            ### cannot do it: the auction solver joins listings against balances.json, and
+            ### two managers may well pick the same name. None for Kickbase's own listings.
+            ### Also what the frontend compares against the logged-in manager's own id to
+            ### decide whether a listing is the user's own - there is no separate
+            ### "isOwnListing" field here, so that question has exactly one computation
+            ### instead of a frontend copy that could drift from this one.
+            "sellerId": player.userId,
             "isFreeAgent": not player.username,
             "expiration": expiration,
             "listedSince": listed_since,
@@ -509,6 +521,15 @@ def taken_free_players(user_token: str, selected_league: object):
 
     ### Get all transfers in the league
     all_transfers = leagues.transfers(user_token, selected_league.id)
+
+    ### Everything from before the season start or league reset belongs to a previous season,
+    ### and a buy price from back then is not this season's buy price - the player was
+    ### reassigned at the reset, which is what the START_DATE market value below stands for.
+    ### balances() and turnovers() have always cut here; this function relied on the feed
+    ### still carrying the pre-reset items, and since the feed walk now stops at the newest
+    ### recorded transfer, that is no longer something to rely on either way.
+    all_transfers = miscellaneous.filter_transfers_from(
+        all_transfers, miscellaneous.get_start_datetime())
 
     ### Built once, not once per transfer: the old code rebuilt this reverse mapping inside
     ### the loop below, and a name it could not resolve landed under the key None, where no
@@ -630,21 +651,10 @@ def turnovers(user_token: str, selected_league: object) -> None:
 
     final_turnovers = []
 
-    ### Load existing transfers from all_transfers.json which were saved in earlier runs
-    all_transfers_path = path.join(DATA_DIR, "all_transfers.json")
-
-    all_transfers = [] # Initialize as empty list first
-
-    ### Check if all_transfers.json exists and load it
-    if path.exists(all_transfers_path):
-        try:
-            with open(all_transfers_path, "r") as f:
-                all_transfers = json.load(f)
-            logging.debug(f"Loaded {len(all_transfers)} existing transfers from all_transfers.json")
-        except json.JSONDecodeError:
-            logging.warning(f"The file {all_transfers_path} is empty or contains invalid JSON. Initializing all_transfers as an empty list.")
-    else:
-        logging.debug(f"The file {all_transfers_path} does not exist. Initializing all_transfers as an empty list.")
+    ### Load existing transfers from all_transfers.json which were saved in earlier runs.
+    ### The same list is the watermark the feed walk in leagues.transfers() stops at, which
+    ### is why loading it lives in one place now.
+    all_transfers = miscellaneous.load_known_transfers()
 
     ### Get new transfers from the API
     new_transfers = leagues.transfers(user_token, selected_league.id)
@@ -676,7 +686,7 @@ def turnovers(user_token: str, selected_league: object) -> None:
     ### Save updated transfers back to all_transfers.json.
     ### The cache stays the raw record of what the API said. Reverted bookings are
     ### dropped below, for the calculation only, so a later correction can still be seen.
-    miscellaneous.write_json_to_file(all_transfers, "all_transfers.json")
+    miscellaneous.write_json_to_file(all_transfers, miscellaneous.ALL_TRANSFERS_FILE)
     logging.debug("Updated all_transfers.json with new transfers")
 
     ### A booking an admin reverted stays in the feed, and an unpaired leftover sale would
@@ -1035,7 +1045,7 @@ def max_bid(team_value: float, balance: float) -> float:
     return max(0, max_negative_balance)
 
 
-def balances(user_token: str, selected_league: object) -> None:
+def balances(user_token: str, selected_league: object, own_user_id: str) -> None:
     """### Retrieves the estimated balances for all users in the league, together with the
     events that produced them.
 
@@ -1048,6 +1058,7 @@ def balances(user_token: str, selected_league: object) -> None:
     Args:
         user_token (str): The user's kkstrauth token.
         selected_league (object): The league the user wants to get data from for the frontend.
+        own_user_id (str): The logged in user's ID, to mark their own row as "isSelf".
     """
     logging.info("Getting balances...")
 
@@ -1174,6 +1185,10 @@ def balances(user_token: str, selected_league: object) -> None:
         final_balances.append({
             "userId": user_id,
             "username": user_name,
+            ### Which of these managers is the user. The auction solver needs it to leave
+            ### the user out of their own rival set and to cap a suggested bid at their own
+            ### ceiling; nothing else in the frontend knew who "you" are.
+            "isSelf": str(user_id) == str(own_user_id),
             "profilePic": miscellaneous.get_profilepic(user_id),
             "teamValue": team_value,
             "balance": balance,

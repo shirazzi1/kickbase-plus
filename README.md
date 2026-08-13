@@ -100,6 +100,8 @@ without the mount it is deleted on every image pull:
 | --- | --- |
 | `/code/data/history/<dataset>/<YYYY-MM-DD>.ndjson` | The append-only history: one line per run per dataset, `{"ts": ..., "rows": ...}`. |
 | `/code/data/last-good/` | The previous copy of each data file, kept before it is overwritten. |
+| `/code/data/market-values/<player_id>.json` | One player's market value curve, plus the marker that says whether it is still current. |
+| `/code/data/teams/teams-<competition_id>.json` | The team ids of a competition, so they do not have to be found by probing every run. |
 
 The history is the part that cannot be recovered. Kickbase serves 31 days of market value
 curve and nothing at all about yesterday's transfer market, so the only record of what was
@@ -115,6 +117,30 @@ the obvious first move.
 
 Everything else - the JSON the frontend reads, the logs - is rebuilt by the next scheduled
 run and does not need a mount.
+
+#### The two caches
+Both are rebuilt from Kickbase if they are lost, so losing them costs requests rather than
+data - but that is the whole point of them, so they belong in the mount.
+
+**Market value curves** (`market-values/`). A run reads one curve per player in the
+competition, around 466 of them, and Kickbase moves market values once a day. Each entry
+keeps the curve plus the `mvud` marker the market response carried when it was fetched:
+
+```json
+{"version": 1, "playerId": "755", "mvud": "2026-08-13T21:00:00Z", "days": 31,
+ "fetchedAt": "2026-08-13T09:12:44+02:00", "history": [{"dt": 20678, "mv": 12300000}]}
+```
+
+An entry is only used when the marker still matches, the window (`days`) is at least as wide
+as the run needs, and the newest point of the curve is dated today or yesterday. Anything
+else - including a market response without a marker at all - means the curve is fetched as it
+always was. `fetchedAt` is for humans reading the directory; nothing depends on it. Delete
+the directory to force a full refetch.
+
+**Team ids** (`teams/`). There is no endpoint listing the teams of a competition, so they
+used to be found by asking for ids 2 to 100. The list is remembered for 24 hours, which is
+the clock a promoted team moves on, and a remembered list that no longer produces a full
+competition is thrown away and the ids are looked for again.
 
 ### docker run
 ```bash
@@ -153,8 +179,9 @@ services:
       - START_DATE=<start_timestamp> # ISO 8601 in UTC, e.g. 2026-08-01T18:00:00Z
       - BID_TOKEN=<bid_token> # any long random string; container exits on startup without it
     volumes:
-      # The append-only history and the last-good snapshots. Without this they are
-      # deleted on every image pull, and the history cannot be fetched again.
+      # The append-only history, the last-good snapshots and the two request caches.
+      # Without this they are deleted on every image pull, and the history cannot be
+      # fetched again.
       - <your_folder>/kickbase-data:/code/data
 ```  
 The backend port `5000` above is configurable via the `FLASK_PORT` environment variable and defaults to `5000` if unset. On macOS, the AirPlay Receiver occupies port `5000` by default, which stops Flask from binding to it - set `FLASK_PORT` to something else in that case.  

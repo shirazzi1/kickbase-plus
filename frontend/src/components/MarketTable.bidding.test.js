@@ -187,8 +187,16 @@ describe("MarketTable bidding", () => {
 
         // The override map distinguishes "withdrawn, so null" from "not touched yet" by
         // key presence (`playerId in bids`) rather than truthiness - a truthiness check
-        // would let the old 480.000 € linger since `null` is falsy either way
-        expect(await screen.findByText("–")).toBeInTheDocument()
+        // would let the old 480.000 € linger since `null` is falsy either way.
+        //
+        // Scoped to the "Dein Gebot" cell's own tooltip rather than a page-wide
+        // findByText("–"): main's auction solver added a "Zwangsverkauf droht" column
+        // that also renders "–" for every row with no seller in distress - which, against
+        // the real balances.json this suite does not mock, is every row here. A bare
+        // findByText("–") would then match more than one element and fail regardless of
+        // whether the withdrawal itself worked.
+        const cell = await screen.findByTitle(/^Kein Vorschlag/)
+        expect(cell).toHaveTextContent("–")
         expect(screen.queryByText("480.000 €")).not.toBeInTheDocument()
     })
 

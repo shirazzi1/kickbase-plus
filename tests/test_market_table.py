@@ -194,9 +194,9 @@ USER_LISTED = {
 }
 
 ### Kai Havertz, listed by a different league member - neither Kickbase nor us.
-### Without this fixture, "isOwnListing" is only ever exercised against userId is
-### None (Kickbase) or userId == OWN_USER_ID (ours), so a bug that flags every
-### league member's listing as our own would go unnoticed.
+### Without this fixture, "sellerId" is only ever exercised against userId is None
+### (Kickbase) or userId == OWN_USER_ID (ours), so a bug that carried every league
+### member's listing as our own id would go unnoticed.
 OTHER_MANAGER_LISTED = {
     "i": "223", "fn": "Kai", "n": "Havertz", "tid": "3", "pos": 3, "st": 0,
     "mvt": 1, "mv": 41000000, "prc": 45000000, "ofc": 0,
@@ -471,24 +471,35 @@ def test_every_row_carries_the_player_id():
         f"expected the fixture player ids, got {[row['playerId'] for row in rows.values()]}"
 
 
-def test_own_listing_is_flagged():
-    """You cannot bid on a player you listed yourself, so the cell has to know."""
+def test_seller_id_identifies_the_users_own_listing():
+    """You cannot bid on a player you listed yourself, so something has to say whose
+
+    listing it is. main.py no longer flags this itself ("isOwnListing" was a second,
+    independently computed answer to the same question the frontend's auction solver
+    already answers from "sellerId" plus the logged-in manager's own id in
+    balances.json) - it only ships the seller's id, and the comparison against the
+    logged-in manager happens once, in the frontend.
+    """
     rows = run_market()
     ### Ginter is listed by OWN_USER_ID in the fixtures
-    assert rows["Ginter"]["isOwnListing"] is True, "expected Ginter flagged as an own listing"
+    assert rows["Ginter"]["sellerId"] == OWN_USER_ID, \
+        f"expected Ginter's sellerId to be the user's own id, got {rows['Ginter']['sellerId']!r}"
 
 
-def test_foreign_and_kickbase_listings_are_not_flagged():
+def test_foreign_and_kickbase_listings_carry_a_different_seller_id():
     rows = run_market()
-    assert rows["Musah"]["isOwnListing"] is False, "expected a Kickbase listing unflagged"
+    assert rows["Musah"]["sellerId"] is None, \
+        f"a Kickbase listing has no seller, got {rows['Musah']['sellerId']!r}"
     ### Havertz is listed by a different league member - the case a check that only
-    ### looks at "userId is not None" would wrongly flag as ours
-    assert rows["Havertz"]["isOwnListing"] is False, \
-        "expected another manager's listing unflagged"
+    ### looks at "sellerId is not None" would wrongly treat as ours
+    assert rows["Havertz"]["sellerId"] == OTHER_USER_ID, \
+        f"expected another manager's own id, got {rows['Havertz']['sellerId']!r}"
+    assert rows["Havertz"]["sellerId"] != OWN_USER_ID, \
+        "another manager's listing must not carry the user's own id"
     for name, row in rows.items():
         if row["isFreeAgent"]:
-            assert row["isOwnListing"] is False, \
-                f"a Kickbase listing is nobody's own listing: {name}"
+            assert row["sellerId"] is None, \
+                f"a Kickbase listing has no seller to flag as the user's own: {name}"
 
 
 def test_rows_carry_the_averaged_growth():
@@ -580,8 +591,8 @@ if __name__ == "__main__":
 
     print("\nthe fields the bid field needs")
     check("every row carries the player id", test_every_row_carries_the_player_id)
-    check("own listing is flagged", test_own_listing_is_flagged)
-    check("foreign and Kickbase listings are not flagged", test_foreign_and_kickbase_listings_are_not_flagged)
+    check("seller id identifies the user's own listing", test_seller_id_identifies_the_users_own_listing)
+    check("foreign and Kickbase listings carry a different seller id", test_foreign_and_kickbase_listings_carry_a_different_seller_id)
     check("rows carry the averaged growth", test_rows_carry_the_averaged_growth)
     check("the growth matches the three day deltas at the default", test_the_growth_matches_the_three_day_deltas_at_the_default)
     check("a wider window changes the growth", test_a_wider_window_changes_the_growth)
