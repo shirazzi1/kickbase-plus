@@ -1477,22 +1477,33 @@ git commit -m "feat: suggest the break-even bid in the market table"
 
 ### Task 7: The Kickbase write calls
 
-**Use the paths, body keys and delete form Task 1 recorded.** The values below are the pre-probe assumption; where the evidence in the spec disagrees, the evidence wins.
+**Task 1's probe settled the endpoints, and it corrected three things this task originally
+assumed.** The spec's *Evidence from the live API* section is authoritative; the summary:
+
+- `POST .../market/{playerId}/offers` with `{"price": N}` is confirmed. `{"prc": N}` is
+  rejected as `InvalidData`, and the singular `.../offer` path is a 404.
+- **A rejected bid arrives as HTTP 500**, e.g. `{"err":5080,"errMsg":"UnderpayNotAllowed"}`
+  for a bid below the market value. The status has to be normalised, and the message read
+  from `errMsg` — `err` is a numeric code and would show the user "5080".
+- **There is no offer id.** `ofs` entries carry no `i`. Removal is
+  `DELETE .../market/{playerId}/offers/{ownUserId}`; the collection without an id answers
+  405. The originally planned `own_offer_id()` is therefore dropped — it would have
+  returned `None` every time and walked into that 405.
 
 **Files:**
 - Create: `tests/test_market_bid.py`
 - Modify: `backend/exceptions.py`
 - Modify: `backend/kickbase/v4/leagues.py` (add after `get_market()`, which ends around line 108)
-- Modify: `backend/kickbase/endpoints/leagues.py:217-244` (`own_offer()`, plus a shared helper)
+
+`backend/kickbase/endpoints/leagues.py` is **not** touched: with `own_offer_id()` gone,
+`own_offer()` has no second reader to share a helper with, so it stays exactly as it is.
 
 **Interfaces:**
 - Consumes: nothing from earlier tasks.
 - Produces:
-  - `exceptions.KickbaseWriteException(status: int, message: str)`, subclass of `KickbaseException`, with a `.status` attribute.
+  - `exceptions.KickbaseWriteException(status: int, message: str)`, subclass of `KickbaseException`, with a `.status` attribute holding an **already-normalised** status (see Step 4).
   - `leagues.place_offer(token, league_id, player_id, price) -> dict`
-  - `leagues.remove_offer(token, league_id, player_id, offer_id=None) -> None`
-  - `Market_Players.own_offer_id(own_user_id) -> str | None`
-  - `Market_Players.own_offer(own_user_id)` — unchanged behaviour, now sharing `_own_offer_entry()`.
+  - `leagues.remove_offer(token, league_id, player_id, own_user_id) -> None`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1615,33 +1626,70 @@ def test_place_offer_sends_a_timeout():
     assert recorder.timeout, f"expected a timeout, got {recorder.timeout!r}"
 
 
-def test_place_offer_surfaces_the_api_message():
-    """A rejected bid has to say why, which the surrounding module's bare except cannot."""
-    body = {"message": "Offer price is below the market value"}
+def test_place_offer_translates_a_known_error_code():
+    """The real shape, recorded live: a bid below the market value comes back as a 500.
+
+    Two things have to happen to it. The status is normalised to 400, because the bid was
+    the user's to get wrong and a forwarded 500 would blame the server. And the message
+    becomes German, because "UnderpayNotAllowed" is not a sentence to show a user.
+    """
+    body = {"err": 5080, "errMsg": "UnderpayNotAllowed", "svcs": []}
 
     def place():
         leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1)
 
     try:
-        with_fake("post", FakeResponse(400, body), place)
+        with_fake("post", FakeResponse(500, body), place)
     except exceptions.KickbaseWriteException as e:
-        assert e.status == 400, f"expected status 400 on the exception, got {e.status}"
-        assert "below the market value" in str(e), f"expected the API message, got: {e}"
+        assert e.status == 400, f"a semantic rejection is a 400, not a 500, got {e.status}"
+        assert "Marktwert" in str(e), f"expected the German message, got: {e}"
+        assert "5080" not in str(e), f"the numeric code must never reach the user, got: {e}"
+        assert "UnderpayNotAllowed" not in str(e), f"expected German, got: {e}"
     else:
-        raise AssertionError("expected a KickbaseWriteException for a 400")
+        raise AssertionError("expected a KickbaseWriteException for a rejected bid")
 
 
-def test_place_offer_survives_an_error_body_without_a_message():
+def test_place_offer_falls_back_to_errmsg_for_an_unknown_code():
+    """An unmapped code still has to say something better than its number."""
+    body = {"err": 9999, "errMsg": "SomethingNewWentWrong", "svcs": []}
+
+    def place():
+        leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1)
+
+    try:
+        with_fake("post", FakeResponse(500, body), place)
+    except exceptions.KickbaseWriteException as e:
+        assert "SomethingNewWentWrong" in str(e), f"expected the errMsg fallback, got: {e}"
+        assert "9999" not in str(e), f"the numeric code must never be the message, got: {e}"
+    else:
+        raise AssertionError("expected a KickbaseWriteException for an unknown code")
+
+
+def test_place_offer_forwards_a_real_outage_as_502():
+    """A 5xx with no error code is Kickbase being broken, not the bid being wrong."""
     def place():
         leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1)
 
     try:
         with_fake("post", FakeResponse(500, None), place)
     except exceptions.KickbaseWriteException as e:
-        assert e.status == 500, f"expected status 500, got {e.status}"
-        assert "500" in str(e), f"message should name the status, got: {e}"
+        assert e.status == 502, f"expected 502 for a codeless 5xx, got {e.status}"
+        assert "500" in str(e), f"message should name the upstream status, got: {e}"
     else:
         raise AssertionError("expected a KickbaseWriteException for a 500")
+
+
+def test_place_offer_passes_a_4xx_through_unchanged():
+    """Kickbase's own 4xx needs no reinterpretation."""
+    def place():
+        leagues.place_offer("tok", LEAGUE_ID, PLAYER_ID, 1)
+
+    try:
+        with_fake("post", FakeResponse(400, {"err": 6, "errMsg": "InvalidData"}), place)
+    except exceptions.KickbaseWriteException as e:
+        assert e.status == 400, f"expected 400 passed through, got {e.status}"
+    else:
+        raise AssertionError("expected a KickbaseWriteException for a 400")
 
 
 def test_place_offer_reports_an_unreachable_api():
@@ -1663,29 +1711,45 @@ def test_place_offer_reports_an_unreachable_api():
 ### ===============================================================================
 
 
-def test_remove_offer_addresses_the_offer():
-    recorder = with_fake("delete", FakeResponse(200, {}), lambda:
-        leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, "999"))
+def test_remove_offer_addresses_the_offer_by_user_id():
+    """The identifier is the user id, and this is the test that pins it down.
 
-    assert PLAYER_ID in recorder.url, f"url should name the player, got {recorder.url}"
+    Live evidence: DELETE on the collection answers 405, and the only identifier the API
+    ever hands back is the user's own id, returned by the POST as "ofi". A user holds at
+    most one offer per player, so keying by user is enough.
+    """
+    recorder = with_fake("delete", FakeResponse(200, {}), lambda:
+        leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, OWN_USER_ID))
+
+    assert recorder.url.endswith(f"/market/{PLAYER_ID}/offers/{OWN_USER_ID}"), \
+        f"expected the offer addressed by user id, got {recorder.url}"
     assert recorder.headers["Cookie"] == "kkstrauth=tok;"
+
+
+def test_remove_offer_never_calls_the_bare_collection():
+    """That route answers 405, so hitting it would fail every withdrawal."""
+    recorder = with_fake("delete", FakeResponse(200, {}), lambda:
+        leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, OWN_USER_ID))
+
+    assert not recorder.url.endswith("/offers"), \
+        f"the collection route takes no DELETE, got {recorder.url}"
 
 
 def test_remove_offer_surfaces_the_api_message():
     def remove():
-        leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, "999")
+        leagues.remove_offer("tok", LEAGUE_ID, PLAYER_ID, OWN_USER_ID)
 
     try:
-        with_fake("delete", FakeResponse(404, {"message": "Offer not found"}), remove)
+        with_fake("delete", FakeResponse(404, {"err": 1, "errMsg": "OfferNotFound"}), remove)
     except exceptions.KickbaseWriteException as e:
         assert e.status == 404, f"expected status 404, got {e.status}"
-        assert "not found" in str(e), f"expected the API message, got: {e}"
+        assert "OfferNotFound" in str(e), f"expected the errMsg, got: {e}"
     else:
         raise AssertionError("expected a KickbaseWriteException for a 404")
 
 
 ### ===============================================================================
-### own_offer_id()
+### own_offer(), against the offer shape recorded live
 ### ===============================================================================
 
 
@@ -1697,44 +1761,47 @@ def market_item(**overrides):
     return item
 
 
-def test_own_offer_id_reads_the_id_from_the_own_offer():
-    player = Market_Players(market_item(
-        ofs=[{"i": "77", "u": OWN_USER_ID, "uoid": OWN_USER_ID, "uop": 5222222}]))
-    assert player.own_offer_id(OWN_USER_ID) == "77", \
-        f"expected 77, got {player.own_offer_id(OWN_USER_ID)}"
+### The exact ofs entry a real POST produced on 2026-08-13. Note the absence of any id
+### field: this is the shape that ruled out addressing a delete route by offer id.
+LIVE_OWN_OFFER = {"u": OWN_USER_ID, "unm": "shirazzi", "uoid": OWN_USER_ID,
+                  "uop": 1271013, "st": 0, "uim": "user/91fd.jpe"}
 
 
-def test_own_offer_id_ignores_a_foreign_offer():
-    """A foreign bid must never be treated as ours, whatever the API starts exposing."""
-    player = Market_Players(market_item(
-        ofs=[{"i": "77", "u": OTHER_USER_ID, "uoid": OTHER_USER_ID, "uop": 999999}]))
-    assert player.own_offer_id(OWN_USER_ID) is None
+def test_own_offer_reads_the_live_offer_shape():
+    player = Market_Players(market_item(ofs=[dict(LIVE_OWN_OFFER)]))
+    assert player.own_offer(OWN_USER_ID) == 1271013, \
+        f"expected 1271013, got {player.own_offer(OWN_USER_ID)}"
 
 
-def test_own_offer_id_is_none_when_the_offer_carries_no_id():
-    """The recorded response has no id in ofs, so this is the normal case, not an edge."""
-    player = Market_Players(market_item(
-        ofs=[{"u": OWN_USER_ID, "uoid": OWN_USER_ID, "uop": 5222222}]))
-    assert player.own_offer_id(OWN_USER_ID) is None
+def test_the_live_offer_shape_carries_no_offer_id():
+    """Documents why remove_offer() takes a user id: there is no offer id to take.
+
+    If Kickbase ever starts sending one, this test fails and is the place to decide
+    whether to switch to it.
+    """
+    assert "i" not in LIVE_OWN_OFFER, \
+        "an offer id appeared in the recorded shape - revisit how removal is addressed"
 
 
-def test_own_offer_id_is_none_without_any_offer():
-    assert Market_Players(market_item()).own_offer_id(OWN_USER_ID) is None
-
-
-def test_own_offer_still_reads_the_price():
-    """The refactor to a shared helper must not change what own_offer() returns."""
-    from_ofs = Market_Players(market_item(
-        ofs=[{"i": "77", "u": OWN_USER_ID, "uoid": OWN_USER_ID, "uop": 5222222}]))
-    assert from_ofs.own_offer(OWN_USER_ID) == 5222222
-
-    ### The mirror on the item itself, which some items carry alone
+def test_own_offer_reads_the_top_level_mirror():
+    """Some items carry only the mirror, with no ofs list at all."""
     mirrored = Market_Players(market_item(uoid=OWN_USER_ID, uop=523350))
     assert mirrored.own_offer(OWN_USER_ID) == 523350
 
+
+def test_own_offer_ignores_a_foreign_offer():
+    """A foreign bid must never be reported as ours, whatever the API starts exposing."""
     foreign = Market_Players(market_item(
         ofs=[{"u": OTHER_USER_ID, "uoid": OTHER_USER_ID, "uop": 999999}]))
     assert foreign.own_offer(OWN_USER_ID) is None
+
+    mirrored_foreign = Market_Players(market_item(uoid=OTHER_USER_ID, uop=999999))
+    assert mirrored_foreign.own_offer(OWN_USER_ID) is None
+
+
+def test_own_offer_is_none_without_any_offer():
+    """The normal case: a listing carries no ofs/uop/uoid keys at all until an offer exists."""
+    assert Market_Players(market_item()).own_offer(OWN_USER_ID) is None
 
 
 ### ===============================================================================
@@ -1743,22 +1810,24 @@ if __name__ == "__main__":
     print("place_offer()")
     check("posts the price to the player", test_place_offer_posts_the_price_to_the_player)
     check("sends a timeout", test_place_offer_sends_a_timeout)
-    check("surfaces the API message", test_place_offer_surfaces_the_api_message)
-    check("survives an error body without a message",
-          test_place_offer_survives_an_error_body_without_a_message)
+    check("translates a known error code", test_place_offer_translates_a_known_error_code)
+    check("falls back to errMsg for an unknown code",
+          test_place_offer_falls_back_to_errmsg_for_an_unknown_code)
+    check("forwards a real outage as 502", test_place_offer_forwards_a_real_outage_as_502)
+    check("passes a 4xx through unchanged", test_place_offer_passes_a_4xx_through_unchanged)
     check("reports an unreachable API", test_place_offer_reports_an_unreachable_api)
 
     print("\nremove_offer()")
-    check("addresses the offer", test_remove_offer_addresses_the_offer)
+    check("addresses the offer by user id", test_remove_offer_addresses_the_offer_by_user_id)
+    check("never calls the bare collection", test_remove_offer_never_calls_the_bare_collection)
     check("surfaces the API message", test_remove_offer_surfaces_the_api_message)
 
-    print("\nown_offer_id()")
-    check("reads the id from the own offer", test_own_offer_id_reads_the_id_from_the_own_offer)
-    check("ignores a foreign offer", test_own_offer_id_ignores_a_foreign_offer)
-    check("is none when the offer carries no id",
-          test_own_offer_id_is_none_when_the_offer_carries_no_id)
-    check("is none without any offer", test_own_offer_id_is_none_without_any_offer)
-    check("leaves own_offer() unchanged", test_own_offer_still_reads_the_price)
+    print("\nown_offer()")
+    check("reads the live offer shape", test_own_offer_reads_the_live_offer_shape)
+    check("the live shape carries no offer id", test_the_live_offer_shape_carries_no_offer_id)
+    check("reads the top level mirror", test_own_offer_reads_the_top_level_mirror)
+    check("ignores a foreign offer", test_own_offer_ignores_a_foreign_offer)
+    check("is none without any offer", test_own_offer_is_none_without_any_offer)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")
@@ -1772,7 +1841,7 @@ cd /Users/maximilianshiraishi/Desktop/Projekte/kickbase-plus/.claude/worktrees/m
 /Users/maximilianshiraishi/Desktop/Projekte/kickbase-plus/venv/bin/python tests/test_market_bid.py
 ```
 
-Expected: everything ERRORs on the missing `place_offer`, `remove_offer`, `own_offer_id` and `KickbaseWriteException`.
+Expected: everything ERRORs on the missing `place_offer`, `remove_offer` and `KickbaseWriteException`. The `own_offer()` tests should pass immediately — that function already exists and this task does not change it; they are there to pin the offer shape the live probe recorded.
 
 - [ ] **Step 3: Add the exception**
 
@@ -1806,6 +1875,14 @@ OFFER_TIMEOUT = 15
 And after `get_market()`:
 
 ```python
+### German for the Kickbase error codes seen live. "UnderpayNotAllowed" is accurate but
+### not a sentence to put in front of a user.
+OFFER_ERRORS = {
+    5080: "Das Gebot liegt unter dem Marktwert.",
+    6: "Kickbase hat das Gebot als ungültig abgewiesen.",
+}
+
+
 def _offer_headers(token: str) -> dict:
     """### The headers every offer call sends."""
     return {
@@ -1815,22 +1892,42 @@ def _offer_headers(token: str) -> dict:
     }
 
 
-def _offer_error(response) -> str:
-    """### The message Kickbase gave for a rejected write.
+def _offer_failure(response) -> "exceptions.KickbaseWriteException":
+    """### Turn a refused offer write into an exception worth showing a user.
 
-    Falls back to naming the status, which is still more than "check your webhook URL".
+    Two corrections happen here, both of them things the live API forced:
+
+    Kickbase reports a refused bid with HTTP 500 - a bid below the market value comes
+    back as {"err": 5080, "errMsg": "UnderpayNotAllowed"}. Forwarding that status would
+    blame the server for the user's typo and bury real outages among ordinary
+    rejections, so a 5xx carrying an error code becomes a 400. A 5xx without one is a
+    genuine outage and becomes a 502. A 4xx is already right and passes through.
+
+    And the message comes from "errMsg". "err" is a numeric code; reading it as a message
+    would show the user "5080".
     """
     try:
         body = response.json()
     except ValueError:
-        return f"Kickbase antwortete mit HTTP {response.status_code}."
+        body = None
 
-    if isinstance(body, dict):
-        for key in ("message", "msg", "err", "error"):
-            if body.get(key):
-                return str(body[key])
+    if not isinstance(body, dict):
+        body = {}
 
-    return f"Kickbase antwortete mit HTTP {response.status_code}."
+    code = body.get("err")
+    ### The mapping first, then Kickbase's own English, then the bare status. Never "err".
+    message = (OFFER_ERRORS.get(code)
+               or body.get("errMsg")
+               or f"Kickbase antwortete mit HTTP {response.status_code}.")
+
+    if response.status_code < 500:
+        status = response.status_code
+    elif code is not None:
+        status = 400
+    else:
+        status = 502
+
+    return exceptions.KickbaseWriteException(status, message)
 
 
 def place_offer(token: str, league_id: str, player_id: str, price: int) -> dict:
@@ -1863,7 +1960,7 @@ def place_offer(token: str, league_id: str, player_id: str, price: int) -> dict:
             504, f"Kickbase ist nicht erreichbar: {e}") from e
 
     if response.status_code >= 400:
-        raise exceptions.KickbaseWriteException(response.status_code, _offer_error(response))
+        raise _offer_failure(response)
 
     try:
         return response.json() if response.content else {}
@@ -1871,26 +1968,27 @@ def place_offer(token: str, league_id: str, player_id: str, price: int) -> dict:
         return {}
 
 
-def remove_offer(token: str, league_id: str, player_id: str, offer_id: str = None) -> None:
+def remove_offer(token: str, league_id: str, player_id: str, own_user_id: str) -> None:
     """### Withdraw the user's own bid on a player.
 
-    `offer_id` is optional because the market response does not reliably expose one; see
-    the evidence section of the bid field spec. Without it the offer is addressed by
-    player alone, which works because a user can hold only one offer per player.
+    The offer is addressed by the user's own id, because that is the only identifier the
+    API exposes for it: "ofs" entries carry no offer id, and the POST that places a bid
+    hands the user id back as "ofi". DELETE on the bare collection answers 405, so the id
+    is not optional. A user holds at most one offer per player, which is what makes
+    keying by user sufficient.
 
     Args:
         token (str): The user's kkstrauth token.
         league_id (str): The league the player is listed in.
         player_id (str): The player whose bid is withdrawn.
-        offer_id (str): The offer to withdraw, when Kickbase exposed one.
+        own_user_id (str): The logged in user's ID, which identifies their offer.
 
     Raises:
         exceptions.KickbaseWriteException: If Kickbase rejects the removal or cannot be
             reached.
     """
-    url = f"https://api.kickbase.com/v4/leagues/{league_id}/market/{player_id}/offers"
-    if offer_id:
-        url = f"{url}/{offer_id}"
+    url = (f"https://api.kickbase.com/v4/leagues/{league_id}/market/{player_id}"
+           f"/offers/{own_user_id}")
 
     try:
         response = requests.delete(url, headers=_offer_headers(token), timeout=OFFER_TIMEOUT)
@@ -1899,78 +1997,21 @@ def remove_offer(token: str, league_id: str, player_id: str, offer_id: str = Non
             504, f"Kickbase ist nicht erreichbar: {e}") from e
 
     if response.status_code >= 400:
-        raise exceptions.KickbaseWriteException(response.status_code, _offer_error(response))
+        raise _offer_failure(response)
 ```
 
 `requests.delete` is called with `json=None` by the test recorder's signature, which the real function does not pass — that is fine, the recorder accepts it as a default.
 
-- [ ] **Step 5: Share one offer lookup between price and id**
+- [ ] **Step 5: Leave `own_offer()` alone**
 
-In `backend/kickbase/endpoints/leagues.py`, replace `own_offer()` (lines 217-244) with a shared helper and two readers, so the "never read a foreign bid as ours" check exists once:
+Nothing to do here, and that is the point. The plan originally split `own_offer()` into a
+shared `_own_offer_entry()` helper plus two readers, so `own_offer()` and `own_offer_id()`
+could not disagree about which bids are ours. With `own_offer_id()` retired — the live API
+exposes no offer id — there is no second reader, and the split would be indirection with
+one caller.
 
-```python
-    def _own_offer_entry(self, own_user_id: str):
-        """### The logged in user's own offer on this player, if there is one.
-
-        Kickbase only reveals the user's own offers: "ofs" never contains another
-        manager's bid. The same price is mirrored on the item itself as "uop", with
-        "uoid" naming the bidder, and some items carry only that mirror. "ofs" is read
-        first and the mirror serves as the fallback.
-
-        The bidder is checked against the user's own ID in both places. A foreign bid
-        must never be reported as the user's own, whatever the API starts exposing - and
-        this check living in one place is why own_offer() and own_offer_id() cannot
-        disagree about it.
-
-        Args:
-            own_user_id (str): The logged in user's ID.
-
-        Returns:
-            dict: The offer, shaped like an "ofs" entry. None if no offer of theirs is
-                placed. The mirror fallback yields {"uop": ...} with no offer id.
-        """
-        wanted = str(own_user_id)
-
-        for offer in self.offers or []:
-            bidder = offer.get("u") or offer.get("uoid")
-            if bidder is not None and str(bidder) == wanted:
-                return offer
-
-        if self.ownOfferUserId is not None and str(self.ownOfferUserId) == wanted:
-            return {"uop": self.ownOfferPrice}
-
-        return None
-
-    def own_offer(self, own_user_id: str) -> float:
-        """### What the logged in user currently bids for this player, if anything.
-
-        Args:
-            own_user_id (str): The logged in user's ID.
-
-        Returns:
-            float: The user's own offer price, or None if no offer of theirs is placed.
-        """
-        offer = self._own_offer_entry(own_user_id)
-
-        return offer.get("uop") if offer else None
-
-    def own_offer_id(self, own_user_id: str) -> str:
-        """### The id of the user's own offer, when Kickbase exposes one.
-
-        The one recorded market response carries no id in its "ofs" entries, so None is
-        the expected answer rather than an edge case - which is why remove_offer() can
-        work without one.
-
-        Args:
-            own_user_id (str): The logged in user's ID.
-
-        Returns:
-            str: The offer id, or None when there is no offer or it carries no id.
-        """
-        offer = self._own_offer_entry(own_user_id)
-
-        return offer.get("i") if offer else None
-```
+Do not modify `backend/kickbase/endpoints/leagues.py`. Confirm this by checking that it
+does not appear in your `git status` before committing.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
@@ -1980,14 +2021,14 @@ cd /Users/maximilianshiraishi/Desktop/Projekte/kickbase-plus/.claude/worktrees/m
 /Users/maximilianshiraishi/Desktop/Projekte/kickbase-plus/venv/bin/python tests/test_market_table.py
 ```
 
-Expected: `12/12 passed` for the first, and the second still green — it exercises `own_offer()`, which just changed shape underneath.
+Expected: `15/15 passed` for the first, and the second still green.
 
 - [ ] **Step 7: Commit**
 
 ```bash
 cd /Users/maximilianshiraishi/Desktop/Projekte/kickbase-plus/.claude/worktrees/market-bid-field
 git status
-git add tests/test_market_bid.py backend/exceptions.py backend/kickbase/v4/leagues.py backend/kickbase/endpoints/leagues.py
+git add tests/test_market_bid.py backend/exceptions.py backend/kickbase/v4/leagues.py
 git commit -m "feat: place and withdraw bids through the Kickbase API"
 ```
 
@@ -2001,7 +2042,7 @@ git commit -m "feat: place and withdraw bids through the Kickbase API"
 - Modify: `app.py`
 
 **Interfaces:**
-- Consumes: `leagues.place_offer`, `leagues.remove_offer`, `Market_Players.own_offer`, `Market_Players.own_offer_id`, `exceptions.KickbaseWriteException`, `main.select_league`.
+- Consumes: `leagues.place_offer`, `leagues.remove_offer(token, league_id, player_id, own_user_id)`, `Market_Players.own_offer`, `exceptions.KickbaseWriteException` (whose `.status` is already normalised — pass it straight through), `main.select_league`.
 - Produces:
   - `miscellaneous.patch_market_bid(player_id: str, own_bid) -> bool` — True when a row was found and rewritten.
   - `POST /api/market/<player_id>/bid`, body `{"price": int}` → `{"ownBid": int|null}` on success.
@@ -2425,8 +2466,8 @@ def withdraw_bid(player_id):
         if listing.own_offer(user_info.id) is None:
             return jsonify({"error": "Auf diesen Spieler hast du kein Gebot abgegeben."}), 409
 
-        leagues.remove_offer(user_token, selected_league.id, player_id,
-                             listing.own_offer_id(user_info.id))
+        ### The user's own id is the offer's identifier - Kickbase exposes no offer id
+        leagues.remove_offer(user_token, selected_league.id, player_id, user_info.id)
 
         miscellaneous.patch_market_bid(player_id, None)
     except exceptions.KickbaseWriteException as e:

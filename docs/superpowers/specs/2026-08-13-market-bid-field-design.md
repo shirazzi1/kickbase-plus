@@ -57,38 +57,85 @@ so `(today + yesterday + twoDays) / 3` is `(mv[-1] − mv[-1-3]) / 3`, which is 
 `average_daily_growth(history, 3)` returns. This is the regression test that guards the
 refactor.
 
-## Open questions, to be settled against the live API before implementing
+## Evidence from the live API
 
-The write endpoints are the one part of this design that cannot be derived from the
-codebase. Nothing in `backend/` writes, so both the paths and the payload shapes are
-community knowledge, not established fact here.
+Probed against league `Kickbase-Elite 26/27` on 2026-08-13. 92 players on the market,
+none of them carrying an offer when the probe started.
 
-**The recorded market response carries no offer id.** From the snapshot in
-`2026-08-12-merged-market-table-design.md` (league `Kickbase-Elite 26/27`):
+### The offer keys exist only while an offer does
+
+A listing with no offer on it carries no `ofs`, no `uop` and no `uoid` at all. Its full
+key set:
+
+```
+dt exs fn i iposl isn mv mvt n ofc pim pos prc prob st tid
+```
+
+So the read-only step could not observe the offer shape — there was nothing to observe.
+The round trip below had to create one first, which is why it stopped being optional.
+
+### Placing: `POST .../offers` with `{"price": N}`
+
+| Request | Response |
+| --- | --- |
+| `POST /v4/leagues/{lid}/market/{pid}/offers` + `{"price": 1271013}` | `200` `{"ofi":"3854976"}` |
+| same path + `{"prc": 1}` | `400` `{"err":6,"errMsg":"InvalidData","svcs":[]}` |
+| `POST .../market/{pid}/offer` (singular) + `{"price": 1}` | `404` |
+| the confirmed path + `{"price": 1}` | `500` `{"err":5080,"errMsg":"UnderpayNotAllowed","svcs":[]}` |
+
+The body key is `price`. `prc` — the key a *listing* uses for its asking price — is
+rejected as invalid data, so the two are not interchangeable.
+
+`ofi` in the success body is the **logged-in user's own id**, not a separate offer
+identifier.
+
+### A rejected bid arrives as HTTP 500
+
+`UnderpayNotAllowed` for a 1 € bid on a player worth 1.271.013 € comes back with status
+**500**, not 4xx. Three consequences for the error path:
+
+- The status cannot be handed to the browser unchanged. A bid below the market value is
+  the user's doing; reporting it as a server fault would send them looking in the wrong
+  place, and would bury real 500s among ordinary rejections in the logs.
+- The message lives in **`errMsg`**. `err` is a numeric code (`5080`, `6`). Reading `err`
+  as a message would show the user "5080".
+- `errMsg` is technical English. The codes seen here need a German mapping, with `errMsg`
+  as the fallback for codes not yet seen.
+
+### Offers carry no id, and removal is keyed by user
+
+Immediately after the successful POST, `ofs` held exactly one entry:
 
 ```json
 "ofs": [{"u": "3854976", "unm": "shirazzi", "uoid": "3854976",
-         "uop": 5222222, "st": 0, "uim": "user/91fd....jpe"}]
+         "uop": 1271013, "st": 0, "uim": "user/91fd....jpe"}]
 ```
 
-No `i`. Either the snapshot was trimmed, or v4 does not expose one — in which case a
-`DELETE .../offers/{offerId}` route cannot be addressed at all and removal must work
-without an id. This decides the shape of the delete path, so it is probed first.
+**No `i`.** The 2026-08-12 snapshot was not trimmed after all — v4 genuinely exposes no
+per-offer id.
 
-The probe, in order, each step gating the next:
+| Request | Response |
+| --- | --- |
+| `DELETE .../market/{pid}/offers` | `405` |
+| `DELETE .../market/{pid}/offers/{ownUserId}` | `200` `{}` — `ofs` and `uop` gone, `ofc` back to `0` |
 
-1. **Read-only.** GET the market and dump the raw `ofs` of a player carrying an own bid.
-   Settles the offer id question without writing anything.
-2. **Harmless write.** `POST .../market/{playerId}/offers` with `{"price": 1}`. A 400 or
-   422 proves the route exists and rejects the price; a 404 means the path is wrong.
-   No bid is placed either way.
-3. **Real round trip.** A bid at the market value on the cheapest player on the market,
-   then remove it again. Confirms the success payload (and whether it returns an offer
-   id) and the delete route in the same pass.
+`405` rather than `404` on the collection says the path is right but needs an identifier
+appended, and that identifier is the user's own id — the same value the POST returned as
+`ofi`. A user holds at most one offer per player, so keying by user is enough.
 
-Findings get written back into this document under *Evidence from the live API* before
-any implementation code is written. The probe itself is a throwaway script in the
-scratchpad and is not committed.
+**This retires the planned `own_offer_id()` helper entirely.** It would have read
+`offer.get("i")`, always found `None`, fallen back to the collection route, and hit the
+405 on every withdrawal.
+
+### What the round trip cost
+
+One real bid, placed and withdrawn: 1.271.013 € on Kevin Müller, the cheapest listing and
+a Kickbase one, priced at exactly the market value so the bid carried no markup. The first
+withdrawal attempt used the collection route and failed, so the bid stood for a few
+minutes until the id-addressed route was found. Had it not been found, the fallback was
+the Kickbase app.
+
+The probe script was a throwaway in the scratchpad and is not committed.
 
 ## Decisions
 
@@ -100,9 +147,10 @@ scratchpad and is not committed.
    negative or the history is too short, the cell shows `–` — the same answer "Tage bis
    BEP" already gives in that case — but still opens an empty input. The tool declines to
    recommend; it does not decline to act.
-3. **Offer ids are never stored.** The delete path looks the offer up in a fresh market
-   read at the moment of deletion. An id written into `market.json` hours earlier would
-   be stale, and the `uoid`/`uop` mirror fallback in `own_offer()` yields no id at all.
+3. **The offer is addressed by the user's own id, resolved server-side.** There is no
+   offer id to store — v4 exposes none, as the evidence above shows. The delete path still
+   reads the market fresh first, to confirm an offer of ours actually exists before asking
+   Kickbase to remove one.
 4. **The league id is resolved server-side.** Like `/api/livepoints`, the endpoints call
    `select_league()` themselves rather than trusting a league id from the browser.
 5. **The confirmed bid is read back from Kickbase.** The cell shows what Kickbase
@@ -180,24 +228,33 @@ the main checkout before `npm run build` or `npm start`. It is covered by the ex
 New in `backend/kickbase/v4/leagues.py`:
 
 ```python
-place_offer(token, league_id, player_id, price)      # POST   .../market/{playerId}/offers
-remove_offer(token, league_id, player_id, offer_id)  # DELETE .../market/{playerId}/offers/{offerId}
+place_offer(token, league_id, player_id, price)         # POST   .../market/{playerId}/offers
+remove_offer(token, league_id, player_id, own_user_id)  # DELETE .../market/{playerId}/offers/{ownUserId}
 ```
-
-Exact paths and the `offer_id` parameter are subject to the probe above.
 
 Both depart from the surrounding module on purpose. The existing 15 call sites wrap a
 bare `except:` around `.json()` and raise
 `NotificatonException("Notification failed! Please check your Discord Webhook URL.")`,
 which is wrong for every one of them and unusable for a bid: a rejected bid must say why
-it was rejected. These two check the status code, parse the API's error message and raise
+it was rejected. These two check the status code, read the API's error message and raise
 a new `exceptions.KickbaseWriteException` carrying both. Both also pass a timeout —
 today not a single Kickbase call has one, so one hung socket parks the caller forever.
 
-**`own_offer_id(own_user_id)`** on `Market_Players`, next to the existing `own_offer()`
-and sharing a private `_own_offer_entry()` helper with it, so the "never read a foreign
-bid as ours" check exists once rather than twice. Returns `None` when the entry carries
-no id — which the probe may show is always.
+**Reading the error message** takes `errMsg` and never `err`, which is a numeric code.
+Known codes get a German sentence, because `UnderpayNotAllowed` is not something to put
+in front of a user:
+
+```python
+OFFER_ERRORS = {
+    5080: "Das Gebot liegt unter dem Marktwert.",
+    6: "Kickbase hat das Gebot als ungültig abgewiesen.",
+}
+```
+
+Anything unmapped falls back to `errMsg`, and anything without an `errMsg` to the status.
+
+**No `own_offer_id()`.** There is no offer id to read. `own_offer()` keeps its existing
+shape, and the delete path passes the logged-in user's id straight through.
 
 ### Backend: the endpoints
 
@@ -206,12 +263,17 @@ Both in `app.py`, both logging in per request as `/api/livepoints` already does.
 | Route | Steps |
 | --- | --- |
 | `POST /api/market/<player_id>/bid` | login → league → validate → `place_offer` → re-read market → `own_offer()` → patch `market.json` → `{"ownBid": n}` |
-| `DELETE /api/market/<player_id>/bid` | login → league → read market → find own offer → `remove_offer` → patch `market.json` → `{"ownBid": null}` |
+| `DELETE /api/market/<player_id>/bid` | login → league → read market → confirm an own offer exists → `remove_offer` → patch `market.json` → `{"ownBid": null}` |
 
 Validation on POST, server-side and not merely in the browser: `price` must be a
 positive integer; the player must currently be on the market; the listing must not be the
 user's own. Each failure answers 4xx with a German message the cell can display
 verbatim.
+
+**A Kickbase 5xx that carries an error code is answered as 400, not passed through.**
+`UnderpayNotAllowed` arrives as a 500, but the bid was the user's to get wrong; forwarding
+the 500 would blame the server for it and drown genuine 500s in the logs. A 5xx *without*
+an error code — a real Kickbase outage — is forwarded as 502.
 
 **Patching `market.json`** means reading the file, finding the row by `playerId`,
 setting `ownBid` and writing it back through `write_json_to_file()`. An unknown
