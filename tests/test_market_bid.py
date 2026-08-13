@@ -11,10 +11,11 @@ docs/superpowers/specs/2026-08-13-market-bid-field-design.md.
 """
 
 import json
+import shutil
 import sys
 import tempfile
 
-from os import path
+from os import makedirs, path
 
 sys.path.insert(0, path.dirname(path.dirname(path.abspath(__file__))))
 
@@ -434,8 +435,23 @@ def test_patch_survives_a_missing_file():
 ### ===============================================================================
 
 
-def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID):
-    """A Flask test client with login, market and the write calls faked out."""
+def bid_row():
+    """The market.json row client_with() seeds for PLAYER_ID.
+
+    A successful POST/DELETE patches this row, and every test that reaches a 200
+    reads it back to confirm the wiring - not just the JSON response.
+    """
+    return {"playerId": PLAYER_ID, "lastName": "Musah", "ownBid": None, "marketValue": 5000000}
+
+
+def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID, market_rows=None):
+    """A Flask test client with login, market, the write calls and market.json faked out.
+
+    DATA_DIR/TIMESTAMP_DIR are redirected to a private temporary directory seeded with
+    market_rows (a row for PLAYER_ID by default), so a call that reaches
+    patch_market_bid() patches that copy rather than the real
+    frontend/src/data/market.json. restore() removes it again.
+    """
     import app as flask_app
     import main
 
@@ -447,9 +463,17 @@ def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID):
         id = LEAGUE_ID
         name = "Test"
 
+    tmp_root = tempfile.mkdtemp()
+    data_dir = path.join(tmp_root, "data")
+    ts_dir = path.join(data_dir, "timestamps")
+    makedirs(ts_dir, exist_ok=True)
+    with open(path.join(data_dir, "market.json"), "w") as f:
+        json.dump(market_rows if market_rows is not None else [bid_row()], f)
+
     original = (flask_app.user.login, flask_app.leagues.get_league_list,
                 flask_app.leagues.get_market, flask_app.leagues.place_offer,
-                flask_app.leagues.remove_offer, main.select_league)
+                flask_app.leagues.remove_offer, main.select_league,
+                miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR, tmp_root)
 
     flask_app.user.login = lambda *a, **k: (FakeUser(), "tok")
     flask_app.leagues.get_league_list = lambda token: [FakeLeague()]
@@ -457,25 +481,45 @@ def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID):
     flask_app.leagues.get_market = lambda token, lid: [Market_Players(i) for i in market()]
     flask_app.leagues.place_offer = place or (lambda *a, **k: {})
     flask_app.leagues.remove_offer = remove or (lambda *a, **k: None)
+    miscellaneous.DATA_DIR = data_dir
+    miscellaneous.TIMESTAMP_DIR = ts_dir
 
     flask_app.app.config["TESTING"] = True
-    return flask_app.app.test_client(), original
+    return flask_app.app.test_client(), original, data_dir
 
 
 def restore(original):
+    """Undo client_with()'s patching and remove its temporary data directory.
+
+    Always call this in a finally block: a test that raises mid-way must not leave
+    miscellaneous.DATA_DIR pointing at a temporary directory that no longer exists.
+    """
     import app as flask_app
     import main
     (flask_app.user.login, flask_app.leagues.get_league_list, flask_app.leagues.get_market,
      flask_app.leagues.place_offer, flask_app.leagues.remove_offer,
-     main.select_league) = original
+     main.select_league, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
+     tmp_root) = original
+    shutil.rmtree(tmp_root, ignore_errors=True)
+
+
+def read_own_bid(data_dir):
+    """Read back ownBid for PLAYER_ID from the faked market.json in data_dir."""
+    with open(path.join(data_dir, "market.json")) as f:
+        rows = json.load(f)
+    return next(row["ownBid"] for row in rows if str(row["playerId"]) == PLAYER_ID)
 
 
 def post_bid(market, price, place=None):
-    """POST a bid and return (status, body)."""
-    client, original = client_with(market, place=place)
+    """POST a bid and return (status, body, own_bid_in_file).
+
+    own_bid_in_file is read back from the faked market.json before restore() removes
+    its temporary directory - reading it after would just be a FileNotFoundError.
+    """
+    client, original, data_dir = client_with(market, place=place)
     try:
         response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": price})
-        return response.status_code, response.get_json()
+        return response.status_code, response.get_json(), read_own_bid(data_dir)
     finally:
         restore(original)
 
@@ -490,18 +534,18 @@ def bid_market():
 
 
 def test_post_rejects_a_non_positive_price():
-    status, body = post_bid(plain_market, 0)
+    status, body, _ = post_bid(plain_market, 0)
     assert status == 400, f"expected 400, got {status} {body}"
     assert "error" in body and body["error"], f"expected a German message, got {body}"
 
 
 def test_post_rejects_a_non_integer_price():
-    status, body = post_bid(plain_market, "viel")
+    status, body, _ = post_bid(plain_market, "viel")
     assert status == 400, f"expected 400, got {status} {body}"
 
 
 def test_post_rejects_a_player_not_on_the_market():
-    client, original = client_with(plain_market)
+    client, original, _ = client_with(plain_market)
     try:
         response = client.post("/api/market/999999/bid", json={"price": 1180000})
         assert response.status_code == 404, \
@@ -515,26 +559,28 @@ def test_post_refuses_an_own_listing():
     def own_listing():
         return [market_item(u={"i": OWN_USER_ID, "n": "shirazzi"})]
 
-    status, body = post_bid(own_listing, 1180000)
+    status, body, _ = post_bid(own_listing, 1180000)
     assert status == 409, f"expected 409, got {status} {body}"
 
 
 def test_post_returns_the_bid_read_back_from_kickbase():
     """Not the typed value: a silently clamped bid would otherwise be shown as typed."""
     calls = []
-    status, body = post_bid(bid_market, 1180000,
+    status, body, own_bid_in_file = post_bid(bid_market, 1180000,
                             place=lambda *a, **k: calls.append(a) or {})
     assert status == 200, f"expected 200, got {status} {body}"
     ### The faked market reports 5.200.000 regardless of what was sent
     assert body == {"ownBid": 5200000}, f"expected the read-back bid, got {body}"
     assert calls, "expected place_offer to have been called"
+    assert own_bid_in_file == 5200000, \
+        "expected the faked market.json row to carry the read-back bid"
 
 
 def test_post_passes_the_kickbase_rejection_through():
     def rejecting(*a, **k):
         raise exceptions.KickbaseWriteException(400, "Offer price is below the market value")
 
-    status, body = post_bid(plain_market, 1, place=rejecting)
+    status, body, _ = post_bid(plain_market, 1, place=rejecting)
     assert status == 400, f"expected the API status passed through, got {status}"
     assert "below the market value" in body["error"], \
         f"expected the API message passed through, got {body}"
@@ -542,8 +588,11 @@ def test_post_passes_the_kickbase_rejection_through():
 
 def test_delete_withdraws_and_reports_no_bid():
     removed = []
-    client, original = client_with(
-        bid_market, remove=lambda *a, **k: removed.append(a))
+    ### Seeded with a pre-existing bid, so the ownBid-cleared assertion below proves the
+    ### withdrawal actually happened rather than the row having started out empty.
+    client, original, data_dir = client_with(
+        bid_market, remove=lambda *a, **k: removed.append(a),
+        market_rows=[dict(bid_row(), ownBid=5200000)])
     try:
         response = client.delete(f"/api/market/{PLAYER_ID}/bid")
         assert response.status_code == 200, \
@@ -551,12 +600,14 @@ def test_delete_withdraws_and_reports_no_bid():
         assert response.get_json() == {"ownBid": None}, \
             f"expected a cleared bid, got {response.get_json()}"
         assert removed, "expected remove_offer to have been called"
+        assert read_own_bid(data_dir) is None, \
+            "expected the faked market.json row's ownBid cleared"
     finally:
         restore(original)
 
 
 def test_delete_without_a_bid_is_a_conflict():
-    client, original = client_with(plain_market)
+    client, original, _ = client_with(plain_market)
     try:
         response = client.delete(f"/api/market/{PLAYER_ID}/bid")
         assert response.status_code == 409, \
