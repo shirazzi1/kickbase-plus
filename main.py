@@ -121,7 +121,7 @@ def build_stages(user_token: str, selected_league: object, own_user_id: str) -> 
         ("market", lambda: market(user_token, selected_league, own_user_id)),
         ("market_value_changes", lambda: market_value_changes(user_token, selected_league)),
         ("taken_free_players", lambda: taken_free_players(user_token, selected_league)),
-        ("balances", lambda: balances(user_token, selected_league)),
+        ("balances", lambda: balances(user_token, selected_league, own_user_id)),
         ("turnovers", lambda: turnovers(user_token, selected_league)),
         ("team_values", lambda: team_value_per_match_day(user_token, selected_league)),
         ("league_user_stats", lambda: league_user_stats_tables(user_token, selected_league)),
@@ -350,6 +350,10 @@ def market(user_token: str, selected_league: object, own_user_id: str) -> None:
             "price": player.price,
             "ownBid": own_bid,
             "seller": player.username or "Kickbase",
+            ### Who to exclude from the bidders for this player. The display name alone
+            ### cannot do it: the auction solver joins listings against balances.json, and
+            ### two managers may well pick the same name. None for Kickbase's own listings.
+            "sellerId": player.userId,
             "isFreeAgent": not player.username,
             "expiration": expiration,
             "listedSince": listed_since,
@@ -982,7 +986,7 @@ def max_bid(team_value: float, balance: float) -> float:
     return max(0, max_negative_balance)
 
 
-def balances(user_token: str, selected_league: object) -> None:
+def balances(user_token: str, selected_league: object, own_user_id: str) -> None:
     """### Retrieves the estimated balances for all users in the league, together with the
     events that produced them.
 
@@ -995,6 +999,7 @@ def balances(user_token: str, selected_league: object) -> None:
     Args:
         user_token (str): The user's kkstrauth token.
         selected_league (object): The league the user wants to get data from for the frontend.
+        own_user_id (str): The logged in user's ID, to mark their own row as "isSelf".
     """
     logging.info("Getting balances...")
 
@@ -1121,6 +1126,10 @@ def balances(user_token: str, selected_league: object) -> None:
         final_balances.append({
             "userId": user_id,
             "username": user_name,
+            ### Which of these managers is the user. The auction solver needs it to leave
+            ### the user out of their own rival set and to cap a suggested bid at their own
+            ### ceiling; nothing else in the frontend knew who "you" are.
+            "isSelf": str(user_id) == str(own_user_id),
             "profilePic": miscellaneous.get_profilepic(user_id),
             "teamValue": team_value,
             "balance": balance,
