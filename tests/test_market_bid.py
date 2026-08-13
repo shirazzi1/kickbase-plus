@@ -617,6 +617,29 @@ def test_delete_without_a_bid_is_a_conflict():
 
 
 ### ===============================================================================
+### CORS - regression guard for removing the blanket CORS(app) policy
+### ===============================================================================
+
+
+def test_cross_origin_preflight_grants_no_origin():
+    """Without flask_cors, Flask's automatic OPTIONS handling adds no CORS headers.
+
+    Guards against CORS(app) being reintroduced: that call reflects any Origin sent to
+    it, so a cross-origin preflight would come back approved for that origin and any
+    page could then POST/DELETE a bid. Needs no fixture - Flask answers OPTIONS itself
+    without calling the view function, so no login/market faking applies here.
+    """
+    import app as flask_app
+
+    response = flask_app.app.test_client().options(
+        f"/api/market/{PLAYER_ID}/bid", headers={"Origin": "https://evil.example"})
+
+    allowed_origin = response.headers.get("Access-Control-Allow-Origin")
+    assert allowed_origin is None, \
+        f"expected no Access-Control-Allow-Origin header, got {allowed_origin!r}"
+
+
+### ===============================================================================
 
 if __name__ == "__main__":
     print("place_offer()")
@@ -664,6 +687,10 @@ if __name__ == "__main__":
     print("\nDELETE /api/market/<id>/bid")
     check("withdraws and reports no bid", test_delete_withdraws_and_reports_no_bid)
     check("is a conflict without a bid", test_delete_without_a_bid_is_a_conflict)
+
+    print("\nCORS")
+    check("cross-origin preflight grants no origin",
+          test_cross_origin_preflight_grants_no_origin)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")

@@ -2,7 +2,6 @@ import logging
 
 from os import getenv
 from flask import Flask, jsonify, request
-from flask_cors import CORS
 
 import main
 from backend import exceptions, miscellaneous
@@ -18,7 +17,12 @@ discord_webhook = getenv("DISCORD_WEBHOOK")
 ### ===============================================================================
 
 app = Flask(__name__)
-CORS(app)  # This will enable CORS for all routes
+### No CORS here, and none should be added back. The frontend reaches this API through
+### the CRA dev server's proxy (see frontend/src/setupProxy.js), which makes every real
+### request same-origin - Flask itself never needs to answer a cross-origin request. A
+### blanket CORS(app) reflects any Origin, which means any page the user's browser opens
+### could POST/DELETE a bid that spends real money in their real league. Do not add it
+### back to make some other cross-origin case convenient.
 
 @app.route("/api/livepoints", methods=["GET"])
 def get_live_points():
