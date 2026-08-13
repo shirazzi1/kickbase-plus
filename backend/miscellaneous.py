@@ -333,44 +333,27 @@ def market_value_deltas(market_value_history: list) -> dict:
     }
 
 
-### How far back a market value history has to reach.
+### How far back a market value history has to reach: the /marketValue/{days} window every
+### request asks for. One value for every player and every run, and the only one this
+### project has ever seen the API answer with data.
 ###
-### Two callers decide this. market_value_deltas() reads the last 31 entries, and
+### Two callers read the history. market_value_deltas() reads the last 31 entries, and
 ### taken_free_players() and turnovers() scan back to START_DATE for the value a player
-### assigned at the season start counts as their buy price. So the answer is "31 days, or
-### back to the season start, whichever is further" - which early in a season is a small
-### fraction of the year that was downloaded for every player before.
+### assigned at the season start counts as their buy price. "31 days, or back to the season
+### start, whichever is further" would therefore be enough, and Phase 0 narrowed the window
+### to exactly that to save bandwidth. It cost the curves instead:
 ###
-### The upper bound is the window the API is known to serve, and the one every request used
-### to ask for.
-MIN_MARKET_VALUE_DAYS = 31
-MAX_MARKET_VALUE_DAYS = 365
-
-
-def market_value_days(now: datetime = None) -> int:
-    """### How many days of market value history a run actually needs.
-
-    Falls back to the full year if START_DATE cannot be read. Asking for too much only
-    costs bandwidth; asking for too little would invent buy prices.
-
-    Args:
-        now (datetime): The instant to measure the season length against, normally now.
-
-    Returns:
-        int: A window between MIN_MARKET_VALUE_DAYS and MAX_MARKET_VALUE_DAYS.
-    """
-    try:
-        start_datetime = get_start_datetime()
-    except exceptions.KickbaseException:
-        return MAX_MARKET_VALUE_DAYS
-
-    now = now or datetime.now(timezone.utc)
-
-    ### Two days of slack: one for the partial day the season started on, one so the
-    ### START_DATE entry is never the very first entry of the response
-    needed = (now - start_datetime).days + 2
-
-    return max(MIN_MARKET_VALUE_DAYS, min(MAX_MARKET_VALUE_DAYS, needed))
+### /marketValue/31 answered HTTP 200 for all 466 players on 2026-08-13, but with at most
+### one entry each. Every delta in market_value_changes.json came out null, no player was
+### recognised as assigned at the season start (4009 of those on the /365 run before, 0
+### after), and 1935 sell transfers found no market value on START_DATE, which left 55 of
+### 172 taken players at a buy price of 0.
+###
+### Why 31 is not served is unverified - it may not be an accepted window, or the segment
+### may not be a day count at all. Do not shrink this again before a manual request against
+### the live API says which. Correctness beats bandwidth: the extra volume is what the
+### response cache is for, not what this constant is for.
+MARKET_VALUE_DAYS = 365
 
 
 def get_start_datetime() -> datetime:

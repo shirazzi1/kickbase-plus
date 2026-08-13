@@ -31,11 +31,6 @@ _user_stats_cache = {}
 _user_performance_cache = {}
 _battles_cache = {}
 
-### The market value window this run settled on. Decided on the first request and only
-### widened if Kickbase does not serve it, so the fallback costs one request, not one per
-### player. See player_marketvalue().
-_market_value_days = None
-
 
 def clear_caches() -> None:
     """### Empty the per-run API caches.
@@ -45,15 +40,12 @@ def clear_caches() -> None:
     are the same for every run until Kickbase moves them, which is the whole point of
     keeping them. See backend/market_value_cache.py.
     """
-    global _market_value_days
-
     _player_statistics_cache.clear()
     _player_marketvalue_cache.clear()
     _transfers_cache.clear()
     _user_stats_cache.clear()
     _user_performance_cache.clear()
     _battles_cache.clear()
-    _market_value_days = None
 
     market_value_cache.forget_mvud()
     miscellaneous.clear_caches()
@@ -206,18 +198,13 @@ def _fill_from_disk(player_ids: list) -> set:
     Returns:
         set: The ids that were served from disk.
     """
-    global _market_value_days
-
     if not player_ids or market_value_cache.current_mvud() is None:
         return set()
-
-    if _market_value_days is None:
-        _market_value_days = miscellaneous.market_value_days()
 
     served = set()
 
     for player_id in player_ids:
-        history = market_value_cache.read(player_id, _market_value_days)
+        history = market_value_cache.read(player_id, miscellaneous.MARKET_VALUE_DAYS)
 
         if history is not None:
             _player_marketvalue_cache[player_id] = history
@@ -251,7 +238,7 @@ def player_statistics(token: str, league_id: str, player_id: str):
     return json_response
 
 
-def player_marketvalue(token: str, player_id: str, days: int = None):
+def player_marketvalue(token: str, player_id: str):
     """
     ### Get the market value history of a given player.
 
@@ -260,50 +247,26 @@ def player_marketvalue(token: str, player_id: str, days: int = None):
     see backend/market_value_cache.py for the format and the four things that invalidate an
     entry. A miss there fetches exactly as before.
 
-    Only as many days as the run actually reads are requested, instead of a full year for
-    every player on every run. See miscellaneous.market_value_days() for what decides the
-    window.
+    Always the full miscellaneous.MARKET_VALUE_DAYS window. A narrower one saved bandwidth
+    and returned curves nobody could read - the constant carries that story.
 
     Args:
         token (str): The user's kkstrauth token.
         player_id (str): The player to fetch the history for.
-        days (int): Override the window. Defaults to what the run needs.
 
     Returns:
         list: The history, oldest first, one entry per day.
     """
-    global _market_value_days
-
     cache_key = str(player_id)
     if cache_key in _player_marketvalue_cache:
         return _player_marketvalue_cache[cache_key]
 
-    if days is None:
-        if _market_value_days is None:
-            _market_value_days = miscellaneous.market_value_days()
-        days = _market_value_days
-
-    cached = market_value_cache.read(cache_key, days)
+    cached = market_value_cache.read(cache_key, miscellaneous.MARKET_VALUE_DAYS)
     if cached is not None:
         _player_marketvalue_cache[cache_key] = cached
         return cached
 
-    history = _fetch_marketvalue(token, player_id, days)
-
-    ### /marketValue/365 is the only window this project has ever asked for, so a shorter
-    ### one going unanswered is a real possibility. Falling back keeps the run alive, and
-    ### remembering the fallback keeps it to one wasted request instead of one per player.
-    ### If Kickbase is simply down, this costs exactly one extra request before the wider
-    ### window fails too and the run stops - see _fetch_marketvalue() for why the 5xx is
-    ### not assumed to be an outage on the first attempt.
-    if history is None and days != miscellaneous.MAX_MARKET_VALUE_DAYS:
-        logging.warning(f"Kickbase did not answer a {days} day market value window (the reason "
-                        f"is in the DEBUG log). Falling back to "
-                        f"{miscellaneous.MAX_MARKET_VALUE_DAYS} days for the rest of this run.")
-        _market_value_days = miscellaneous.MAX_MARKET_VALUE_DAYS
-        ### The window that was actually served, so the disk cache records the wider one
-        days = _market_value_days
-        history = _fetch_marketvalue(token, player_id, days)
+    history = _fetch_marketvalue(token, player_id, miscellaneous.MARKET_VALUE_DAYS)
 
     if history is None:
         raise exceptions.KickbaseException(
@@ -311,7 +274,7 @@ def player_marketvalue(token: str, player_id: str, days: int = None):
 
     _player_marketvalue_cache[cache_key] = history
 
-    market_value_cache.write(cache_key, days, history)
+    market_value_cache.write(cache_key, miscellaneous.MARKET_VALUE_DAYS, history)
 
     return history
 
@@ -346,21 +309,13 @@ def _fetch_marketvalue(token: str, player_id: str, days: int):
     """
     url = f"https://api.kickbase.com/v4/competitions/1/players/{player_id}/marketValue/{days}"
 
-    ### A window the API does not serve reads as an answer here rather than as a failure,
-    ### so player_marketvalue() can widen it. Which statuses mean that is not obvious:
-    ### the only evidence in this repository of how Kickbase answers for a resource it
-    ### does not have is the note in competitions.get_team_overview(), and it says 500.
-    ### So a server error counts as "not served" too - but only while there is a wider
-    ### window left to try. Once the request is already at MAX_MARKET_VALUE_DAYS, the
-    ### same 5xx is a real outage and travels on, so a broken Kickbase still fails loudly
-    ### instead of silently producing histories nobody can read.
-    ###
-    ### Everything else - an expired token, a rate limit, a hung socket - always travels
-    ### on to the caller.
+    ### A rejected request and a body without an "it" list read as "no history here"
+    ### rather than as a failure, so the caller can turn them into one message that names
+    ### the player. Everything else - a 5xx, an expired token, a rate limit, a hung socket
+    ### - travels on to the caller, because there is no second window left to try and a
+    ### broken Kickbase has to fail loudly instead of silently producing histories nobody
+    ### can read.
     unserved = (exceptions.ApiRequestException, exceptions.ApiResponseException)
-
-    if days != miscellaneous.MAX_MARKET_VALUE_DAYS:
-        unserved += (exceptions.ApiUnavailableException,)
 
     ### Send GET request to get the market value history of the given player
     try:
