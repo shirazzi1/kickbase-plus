@@ -927,8 +927,13 @@ def patch_market_bid(player_id: str, own_bid) -> bool:
     try:
         with open(market_path, "r") as f:
             rows = json.load(f)
-    except json.JSONDecodeError:
-        logging.warning(f"{market_path} is empty or invalid, so no bid was patched into it.")
+    except (OSError, json.JSONDecodeError) as e:
+        ### OSError covers a permissions problem or a stale mount on open(), not just a
+        ### missing file (path.exists() above already ruled that out). Either way the
+        ### bid was already placed and read back by the caller, so this is a stale file,
+        ### not a failed bid - it must answer like every other "nothing matched" branch
+        ### here, not escape as an uncaught exception.
+        logging.warning(f"Could not read {market_path}, so no bid was patched into it: {e}")
         return False
 
     for row in rows:
