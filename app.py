@@ -116,6 +116,14 @@ def _check_bid_token():
     The comparison against the configured token uses hmac.compare_digest() rather than
     != so a byte-by-byte early exit cannot be timed from outside.
 
+    Both sides are encoded to UTF-8 bytes before that comparison. Werkzeug decodes
+    headers as latin-1, so a header value can arrive as a str holding a non-ASCII
+    character, and compare_digest() raises TypeError as soon as either argument is a
+    non-ASCII str - reproducible with hmac.compare_digest("ä", "x"). Uncaught, that
+    would turn an unauthenticated request into a bare 500 with no JSON error body, and
+    would turn an operator's own choice of an umlaut in BID_TOKEN into a 500 on every
+    single bid. Comparing bytes instead sidesteps the restriction entirely.
+
     Returns:
         A (response, status) tuple to return immediately if the request is rejected,
         or None if the request may proceed.
@@ -127,7 +135,7 @@ def _check_bid_token():
                                   "betreibt."}), 503
 
     supplied_token = request.headers.get("X-Bid-Token", "")
-    if not hmac.compare_digest(supplied_token, bid_token):
+    if not hmac.compare_digest(supplied_token.encode("utf-8"), bid_token.encode("utf-8")):
         return jsonify({"error": "Ungültiges oder fehlendes Token für diese Aktion."}), 401
 
     return None

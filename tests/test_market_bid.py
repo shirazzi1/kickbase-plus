@@ -30,6 +30,12 @@ OTHER_USER_ID = "2592773"
 LEAGUE_ID = "11412166"
 PLAYER_ID = "8289"
 
+### The token client_with() sets flask_app.bid_token to, so the suite needs no BID_TOKEN
+### in the environment and is not accidentally green just because one happens to be
+### unset. Kept ASCII: the tests that specifically exercise a non-ASCII token set their
+### own value, so what varies there stays legible.
+TEST_BID_TOKEN = "test-suite-bid-token"
+
 PASSED = []
 
 
@@ -90,6 +96,24 @@ def with_fake(method, response, fn):
     finally:
         setattr(leagues.requests, method, original)
     return recorder
+
+
+### ===============================================================================
+### get_market()
+### ===============================================================================
+
+
+def test_get_market_sends_a_timeout():
+    """Finding 3: the confirming read-back must not be able to hang indefinitely.
+
+    place_offer() and remove_offer() already send OFFER_TIMEOUT; get_market() is what
+    app.py calls right after either of them to confirm the write, and previously had no
+    timeout at all - a hung socket there would block the response in exactly the window
+    the 502 "could not confirm" outcome exists for, after the money had already moved.
+    """
+    recorder = with_fake("get", FakeResponse(200, {"it": []}), lambda:
+        leagues.get_market("tok", LEAGUE_ID))
+    assert recorder.timeout, f"expected a timeout, got {recorder.timeout!r}"
 
 
 ### ===============================================================================
@@ -430,6 +454,35 @@ def test_patch_survives_a_missing_file():
             miscellaneous.DATA_DIR = original
 
 
+def test_patch_survives_an_unreadable_file():
+    """Finding 4: an OSError from open() (permissions, a stale mount) must not escape.
+
+    By the time patch_market_bid() runs, the bid has already been placed and read back
+    by the caller - a stale market.json is not a failed bid, so this has to answer
+    False, the same contract every other "nothing was patched" branch here already
+    honours, rather than raise and leave app.py's caller to turn it into a 500.
+    """
+    def raise_permission_denied(*a, **k):
+        raise OSError(13, "Permission denied")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = path.join(tmp, "data")
+        makedirs(data_dir, exist_ok=True)
+        with open(path.join(data_dir, "market.json"), "w") as f:
+            json.dump(market_rows(), f)
+
+        original_data_dir = miscellaneous.DATA_DIR
+        miscellaneous.DATA_DIR = data_dir
+        ### Injected as a module global so it shadows the builtin only inside
+        ### miscellaneous.py, without touching open() anywhere else in the process.
+        miscellaneous.open = raise_permission_denied
+        try:
+            assert miscellaneous.patch_market_bid("8289", 1) is False
+        finally:
+            del miscellaneous.open
+            miscellaneous.DATA_DIR = original_data_dir
+
+
 ### ===============================================================================
 ### The endpoints
 ### ===============================================================================
@@ -451,7 +504,10 @@ def bid_headers():
     fail-closed test below (which monkeypatches flask_app.bid_token to None) is not
     fighting a stale value captured at import time. Every test that exercises the
     endpoints' existing behaviour (not the token check itself) sends this, so the token
-    check passes through to whatever was already being tested.
+    check passes through to whatever was already being tested. Always call this after
+    client_with(), which is what sets flask_app.bid_token to TEST_BID_TOKEN in the first
+    place - calling it before would read whatever BID_TOKEN happens to be in the
+    environment, or None.
     """
     import app as flask_app
     return {"X-Bid-Token": flask_app.bid_token}
@@ -464,6 +520,11 @@ def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID, market
     market_rows (a row for PLAYER_ID by default), so a call that reaches
     patch_market_bid() patches that copy rather than the real
     frontend/src/data/market.json. restore() removes it again.
+
+    Also sets flask_app.bid_token to TEST_BID_TOKEN, restored the same way, so the whole
+    suite is independent of whether BID_TOKEN is set in the environment - setting it via
+    os.environ would only work by the accident that `import app` happens inside test
+    functions rather than at module load time.
     """
     import app as flask_app
     import main
@@ -486,7 +547,8 @@ def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID, market
     original = (flask_app.user.login, flask_app.leagues.get_league_list,
                 flask_app.leagues.get_market, flask_app.leagues.place_offer,
                 flask_app.leagues.remove_offer, main.select_league,
-                miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR, tmp_root)
+                miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR, flask_app.bid_token,
+                tmp_root)
 
     flask_app.user.login = lambda *a, **k: (FakeUser(), "tok")
     flask_app.leagues.get_league_list = lambda token: [FakeLeague()]
@@ -496,6 +558,7 @@ def client_with(market, place=None, remove=None, own_user_id=OWN_USER_ID, market
     flask_app.leagues.remove_offer = remove or (lambda *a, **k: None)
     miscellaneous.DATA_DIR = data_dir
     miscellaneous.TIMESTAMP_DIR = ts_dir
+    flask_app.bid_token = TEST_BID_TOKEN
 
     flask_app.app.config["TESTING"] = True
     return flask_app.app.test_client(), original, data_dir
@@ -512,7 +575,7 @@ def restore(original):
     (flask_app.user.login, flask_app.leagues.get_league_list, flask_app.leagues.get_market,
      flask_app.leagues.place_offer, flask_app.leagues.remove_offer,
      main.select_league, miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR,
-     tmp_root) = original
+     flask_app.bid_token, tmp_root) = original
     shutil.rmtree(tmp_root, ignore_errors=True)
 
 
@@ -830,6 +893,56 @@ def test_bid_token_unset_refuses_every_request_even_with_a_token():
         restore(original)
 
 
+def test_post_with_a_non_ascii_token_succeeds():
+    """Finding 2: a legitimate non-ASCII BID_TOKEN must not crash the comparison.
+
+    hmac.compare_digest() raises TypeError as soon as either argument is a non-ASCII
+    str - reproducible with hmac.compare_digest("ä", "x") - and nothing in
+    .env.example or README.md tells an operator to avoid an umlaut in the token they
+    pick. Encoding both sides to bytes before comparing (the fix for this finding)
+    means a matching non-ASCII token authenticates cleanly rather than 500ing on every
+    single bid.
+    """
+    import app as flask_app
+
+    ### The pre-check must see the offer (else the endpoint would 409 before reaching
+    ### remove_offer); the read-back that follows must not, matching how a real
+    ### successful withdrawal looks once Kickbase applied it - see
+    ### test_delete_withdraws_and_reports_no_bid for the same shape without the token.
+    client, original, data_dir = client_with(
+        market_then(bid_market, plain_market), market_rows=[dict(bid_row(), ownBid=5200000)])
+    previous_token = flask_app.bid_token
+    non_ascii_token = "Bietertöken-äöü-ß"
+    flask_app.bid_token = non_ascii_token
+    try:
+        response = client.delete(f"/api/market/{PLAYER_ID}/bid",
+                                  headers={"X-Bid-Token": non_ascii_token})
+        assert response.status_code == 200, \
+            (f"expected the matching non-ASCII token to succeed, got "
+             f"{response.status_code} {response.get_json()}")
+    finally:
+        flask_app.bid_token = previous_token
+        restore(original)
+
+
+def test_post_with_a_non_ascii_header_against_an_ascii_token_is_unauthorized():
+    """Finding 2: a wrong non-ASCII header must fail cleanly at 401, not crash at 500.
+
+    Werkzeug decodes headers as latin-1, so a caller sending "ä" arrives as an ordinary
+    (non-ASCII) str, not bytes. Before encoding both sides of the comparison to bytes,
+    this raised an uncaught TypeError - a 500 with no JSON error body, indistinguishable
+    from the Flask API being unreachable at all.
+    """
+    client, original, _ = client_with(plain_market)
+    try:
+        response = client.post(f"/api/market/{PLAYER_ID}/bid", json={"price": 1180000},
+                                headers={"X-Bid-Token": "ä-definitely-wrong"})
+        assert response.status_code == 401, \
+            f"expected a clean 401, got {response.status_code} {response.get_json()}"
+    finally:
+        restore(original)
+
+
 def test_wrong_token_is_401_while_unset_is_503():
     """The two misconfiguration-shaped failures must not collapse into one status.
 
@@ -862,7 +975,10 @@ def test_wrong_token_is_401_while_unset_is_503():
 ### ===============================================================================
 
 if __name__ == "__main__":
-    print("place_offer()")
+    print("get_market()")
+    check("sends a timeout", test_get_market_sends_a_timeout)
+
+    print("\nplace_offer()")
     check("posts the price to the player", test_place_offer_posts_the_price_to_the_player)
     check("sends a timeout", test_place_offer_sends_a_timeout)
     check("translates a known error code", test_place_offer_translates_a_known_error_code)
@@ -894,6 +1010,7 @@ if __name__ == "__main__":
     check("leaves other rows alone", test_patch_leaves_other_rows_alone)
     check("changes nothing for an unknown player", test_patch_of_an_unknown_player_changes_nothing)
     check("survives a missing file", test_patch_survives_a_missing_file)
+    check("survives an unreadable file", test_patch_survives_an_unreadable_file)
 
     print("\nPOST /api/market/<id>/bid")
     check("rejects a non positive price", test_post_rejects_a_non_positive_price)
@@ -930,6 +1047,9 @@ if __name__ == "__main__":
           test_delete_with_the_wrong_token_is_unauthorized)
     check("BID_TOKEN unset refuses every request even with a token",
           test_bid_token_unset_refuses_every_request_even_with_a_token)
+    check("a non-ASCII token succeeds", test_post_with_a_non_ascii_token_succeeds)
+    check("a non-ASCII header against an ASCII token is unauthorized",
+          test_post_with_a_non_ascii_header_against_an_ascii_token_is_unauthorized)
     check("wrong token is 401 while unset is 503",
           test_wrong_token_is_401_while_unset_is_503)
 
