@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta, timezone
 from os import getenv, path, makedirs
 from zoneinfo import ZoneInfo
-from backend.paths import DATA_DIR, LAST_GOOD_DIR, TIMESTAMP_DIR
+from backend.paths import DATA_DIR, HISTORY_DIR, LAST_GOOD_DIR, TIMESTAMP_DIR
 
 from backend import exceptions
 from backend.kickbase import http
@@ -925,6 +925,123 @@ def season_is_over(now: datetime) -> bool:
     return parse_feed_timestamp(match_days[-1]["lastMatch"]) < now
 
 
+### Which datasets get a line appended to the history store on every write.
+###
+### The rule is: keep what only exists in the moment it was fetched, skip what can be
+### rebuilt or is already a history of its own.
+###
+###   - market: listings, bid counts and asking prices vanish the second a listing
+###     expires. Nothing anywhere can reconstruct yesterday's market.
+###   - market_value_changes: the API now serves 31 days of value curve instead of 365
+###     (Phase 0), so anything reading a longer curve depends on this store accumulating
+###     it. Every run not recorded is a hole that can never be filled.
+###   - balances: budgets, team values and max bids are computed from the feed plus
+###     estimates. Both the estimate and the inputs move, so "what did we believe about
+###     this manager's budget on Tuesday" is not derivable after the fact.
+###   - taken_players: who owned whom. The feed covers the transfers, but not a squad as
+###     it stood, and a reverted booking rewrites the derived history retroactively.
+###
+### Deliberately left out:
+###
+###   - STATIC_teams, STATIC_users, match_days: static or near static. A daily copy of the
+###     same 170 KB buys nothing.
+###   - all_transfers, turnovers, revenue_sum, team_values, league_user_stats,
+###     achievements: already cumulative, and derived from the activity feed, which
+###     Kickbase backfills on request. Snapshotting a list that grows all season, six times
+###     a day, costs quadratic disk for information the feed hands out for free.
+###   - free_players: a player only matters once they are listed, and then market covers
+###     them.
+###   - live_points: rewritten continuously during a matchday by app.py, so six snapshots
+###     a day are neither a history nor current. The live swing meter needs a cadence of
+###     its own, not this one.
+###   - every ts_ file: it records when a write happened, which the "ts" of the history
+###     line already says.
+HISTORICISED_DATASETS = frozenset({
+    "market",
+    "market_value_changes",
+    "balances",
+    "taken_players",
+})
+
+
+def history_file_path(dataset: str, moment: datetime = None) -> str:
+    """### Where the history of one dataset for one day lives.
+
+    Kept as a function rather than spelled out at the call site because the diff engine
+    that reads this store has to agree with the writer on the layout, down to the date
+    format.
+
+    The date is the calendar date in the app timezone, and so is the "ts" of every line in
+    the file - one instant, one rendering, and the date part of a line always matches the
+    file it sits in. UTC would split the local day at 02:00, right between two scheduled
+    runs, so a "day" file would stop meaning a day of runs.
+
+    Args:
+        dataset (str): The dataset name without the ".json", e.g. "market".
+        moment (datetime): The instant to file the line under, normally now.
+
+    Returns:
+        str: The absolute path of the NDJSON file, whose directory may not exist yet.
+    """
+    moment = moment or datetime.now(timezone.utc)
+    day = moment.astimezone(ZoneInfo(getenv("TZ", "Europe/Berlin")))
+
+    return path.join(HISTORY_DIR, dataset, f"{day.strftime('%Y-%m-%d')}.ndjson")
+
+
+def _append_history(file_name: str, data) -> None:
+    """### Append one snapshot of a dataset to its append-only history.
+
+    One line per run, `{"ts": ..., "rows": ...}`, where "rows" is the payload that was just
+    written verbatim. Verbatim matters: the point of the store is that a diff engine sees
+    exactly what the frontend saw, not a reduced version that has to be kept in sync with
+    the real one.
+
+    Called only after the main write has landed, which buys two things. The store never
+    records a payload that failed to reach disk, and the payload is known to serialise -
+    the same object was just dumped successfully.
+
+    A failure here is logged and shrugged off, the same deal as the .last-good snapshot: it
+    must never be the reason a run loses the data it fetched. The cost is a missing line,
+    and a missing line is what happens on a failed run anyway.
+
+    The append is a single write() to a file opened in append mode, so a line is either
+    fully there or not there at all, and a reader can skip a truncated last line. os.replace
+    is no help here - rewriting the whole file to add a line is what the append-only shape
+    exists to avoid.
+
+    Args:
+        file_name (str): The data file that was just written, e.g. "market.json".
+        data (any): The payload that was written.
+    """
+    dataset = file_name[:-len(".json")] if file_name.endswith(".json") else file_name
+
+    if dataset not in HISTORICISED_DATASETS:
+        return
+
+    now = datetime.now(ZoneInfo(getenv("TZ", "Europe/Berlin")))
+    file_path = history_file_path(dataset, now)
+
+    try:
+        ### Built in full before the file is opened, so a serialisation failure cannot
+        ### leave half a line behind
+        line = json.dumps({"ts": now.isoformat(), "rows": data}, separators=(",", ":")) + "\n"
+
+        makedirs(path.dirname(file_path), exist_ok=True)
+
+        with open(file_path, "a") as f:
+            f.write(line)
+            ### The store has no backfill. A line that only ever reached the page cache is
+            ### a line lost for good if the host goes down, so it goes to the disk now.
+            f.flush()
+            os.fsync(f.fileno())
+    except (OSError, TypeError, ValueError) as e:
+        logging.warning(f"Could not append {dataset} to the history store: {e}")
+        return
+
+    logging.debug(f"Appended a {dataset} snapshot to {file_path}")
+
+
 def write_json_to_file(data, file_name: str) -> None:
     """Writes a JSON object to a file.
 
@@ -937,6 +1054,11 @@ def write_json_to_file(data, file_name: str) -> None:
     Before a data file is replaced, its previous content is snapshotted (see
     _snapshot_last_good). A failure is raised rather than logged: this used to swallow
     every write error and let the run report success over a file that was never written.
+
+    After the file has landed, the datasets listed in HISTORICISED_DATASETS get the same
+    payload appended to their append-only history (see _append_history). This is the one
+    funnel every dataset already passes through, which is why the history hangs off it
+    rather than off thirteen call sites that would each have to remember.
 
     Args:
         data (any): data to be written to the file
@@ -986,6 +1108,10 @@ def write_json_to_file(data, file_name: str) -> None:
         raise
 
     logging.debug(f"Wrote {file_name}")
+
+    ### Strictly after the replace, and outside the try above: the history records what is
+    ### on disk, and it must not be able to turn a successful write into a raised failure
+    _append_history(file_name, data)
 
 
 def write_timestamp(file_name: str, rows: int = None) -> None:

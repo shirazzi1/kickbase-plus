@@ -23,5 +23,7 @@ frontend/node_modules/
 ### directory, so nothing in the image needs it.
 frontend/src/data/
 logs/
-### Snapshots of the previous good data files, written at runtime
+### Runtime state: the previous-good snapshots and the append-only history store. Baking a
+### build machine's copy into the image would ship someone else's league as history, and the
+### mount would then shadow it anyway.
 data/

@@ -25,3 +25,17 @@ TIMESTAMP_DIR = path.join(DATA_DIR, "timestamps")
 ### next to every dataset would double the rebuilds without a single component importing
 ### it. Nothing in the frontend reads these.
 LAST_GOOD_DIR = path.join(BASE_PATH, "data", "last-good")
+
+### Where the append-only history of the datasets accumulates: one NDJSON line per run,
+### one file per dataset per day.
+###
+### Outside DATA_DIR for the same reason LAST_GOOD_DIR is, only more so. Everything under
+### frontend/src is watched by the create-react-app dev server that serves this project in
+### production, and this store gains a line six times a day and never shrinks - watching it
+### would mean a rebuild per append over a file that grows all season. Nothing in the
+### frontend reads these; they are the raw material for diffing snapshots against each
+### other.
+###
+### Shares the "data" parent with LAST_GOOD_DIR on purpose, so a single volume mount of
+### /code/data makes everything that has to survive an image pull survive it.
+HISTORY_DIR = path.join(BASE_PATH, "data", "history")
