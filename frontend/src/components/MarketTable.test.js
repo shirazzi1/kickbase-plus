@@ -24,6 +24,17 @@ jest.mock("../data/market.json", () => ([
         expiration: null,
         listedSince: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(), offerCount: 0,
         today: 1000, yesterday: 1000, twoDays: 1000, sevenDaysAvg: null, thirtyDaysAvg: null
+    },
+    {
+        // Listed by the user. Nobody can bid on their own player, so this row must not carry
+        // a minimum bid at all - let alone one marked as too expensive for its own owner.
+        playerId: "755", teamId: "8", position: "STU", firstName: "Thomas",
+        lastName: "Müller", status: 0, statusText: null,
+        marketValue: 5000000, price: 5000000, ownBid: null,
+        seller: "shirazzi", sellerId: "2", isFreeAgent: false,
+        expiration: null,
+        listedSince: new Date(Date.now() - 30 * 60 * 60 * 1000).toISOString(), offerCount: 0,
+        today: 1000, yesterday: 1000, twoDays: 1000, sevenDaysAvg: null, thirtyDaysAvg: null
     }
 ]))
 
@@ -90,7 +101,7 @@ describe("MarketTable", () => {
 
         const rows = screen.getAllByRole("row")
         // The header row plus one row per listing
-        expect(rows.length).toBe(3)
+        expect(rows.length).toBe(4)
     })
 
     it("shows a listing age for both listing sources", () => {
@@ -113,9 +124,9 @@ describe("MarketTable", () => {
         render(<MarketTable />)
 
         expect(screen.getByText("Verdeckte Bieter")).toBeTruthy()
-        // Anna can pay 10.000.000 on either listing. The user is not their own rival, and
-        // the seller of the Ginter listing has nothing anyway. Kickbase never says who is
-        // bidding, so the count comes with who it could be.
+        // Anna can pay 10.000.000 on either foreign listing. The user is not their own
+        // rival, and the seller of the Ginter listing has nothing anyway. Kickbase never
+        // says who is bidding, so the count comes with who it could be.
         // Anchored, so the same name inside the Mindestgebot tooltip does not count
         expect(screen.getAllByLabelText(/^Anna \(max\. 30\.000\.000/).length).toBe(2)
     })
@@ -130,6 +141,29 @@ describe("MarketTable", () => {
         // a non breaking space
         expect(rowOf("Matthias Ginter").textContent).toMatch(/20\.000\.000/)
         expect(screen.getAllByLabelText(/Nötig wären 30\.000\.001/).length).toBe(2)
+        // Marked as the own limit rather than coloured like an error: on the real market
+        // nine rows in ten sit above the own ceiling, and a red column there would read as
+        // "you can buy nothing"
+        expect(rowOf("Matthias Ginter").textContent).toContain("dein Max.")
+    })
+
+    it("offers no bid on the user's own listing", () => {
+        render(<MarketTable />)
+
+        // Bidding on your own player is impossible, so a number here would be nonsense -
+        // and before the guard it was the richest manager's whole budget, in red
+        const own = rowOf("Thomas Müller").textContent
+        expect(own).toContain("eigene Listung")
+        expect(own).not.toMatch(/20\.000\.000/)
+    })
+
+    it("names the possible buyers of the user's own listing", () => {
+        render(<MarketTable />)
+
+        // The same set, read the other way round: who could take the player off you. Anna
+        // can pay the 5.000.000, the broke seller of the other listing cannot.
+        expect(screen.getAllByLabelText(/^Mögliche Käufer: Anna \(max\. 30\.000\.000/).length).toBe(1)
+        expect(screen.queryAllByLabelText(/^Mögliche Käufer:.*Pleite/).length).toBe(0)
     })
 
     it("flags a listing from a seller who is deep in the red", () => {
@@ -137,8 +171,10 @@ describe("MarketTable", () => {
 
         // 6.000.000 in the red with nothing left to bid, up for over a day, no bids
         expect(rowOf("Matthias Ginter").textContent).toContain("Zwangsverkauf droht")
-        // A Kickbase listing has no seller under pressure behind it
+        // A Kickbase listing has no seller under pressure behind it, and neither has one
+        // of your own - however deep in the red you are, you are not lowballing yourself
         expect(rowOf("Jeffrey Gouweleeuw").textContent).not.toContain("Zwangsverkauf")
+        expect(rowOf("Thomas Müller").textContent).not.toContain("Zwangsverkauf")
     })
 
     it("lists every manager's stack above the table", () => {
@@ -147,5 +183,7 @@ describe("MarketTable", () => {
         // Collapsed, so only the summary shows - and it places the user in the field
         expect(screen.getByText(/Bieter-Übersicht/)).toBeTruthy()
         expect(screen.getByText(/Platz 2 von 3/)).toBeTruthy()
+        // isSelf is in the fixture, so the transition warning must stay away
+        expect(screen.queryByText(/kein Manager als/)).toBeNull()
     })
 })

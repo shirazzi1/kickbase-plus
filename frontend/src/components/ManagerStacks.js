@@ -1,6 +1,7 @@
 import Accordion from "@mui/material/Accordion"
 import AccordionDetails from "@mui/material/AccordionDetails"
 import AccordionSummary from "@mui/material/AccordionSummary"
+import Alert from "@mui/material/Alert"
 import Avatar from "@mui/material/Avatar"
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore"
 import LinearProgress from "@mui/material/LinearProgress"
@@ -44,11 +45,26 @@ function ManagerStacks({ balances }) {
     const rank = me ? stacks.findIndex((stack) => stack.isSelf) + 1 : null
 
     const summary = rank
-        ? `Bieter-Übersicht — du liegst mit ${currencyFormatter.format(stacks[rank - 1].maxBid)} `
+        ? `Bieter-Übersicht - du liegst mit ${currencyFormatter.format(stacks[rank - 1].maxBid)} `
             + `auf Platz ${rank} von ${stacks.length}`
-        : `Bieter-Übersicht — ${stacks.length} Manager nach geschätztem Maximalgebot`
+        : `Bieter-Übersicht - ${stacks.length} Manager nach geschätztem Maximalgebot`
 
     return (
+        <>
+        {/* balances.json written before this feature carries no "isSelf", and guessing
+            which manager is the user would be worse than saying so. Outside the accordion
+            on purpose: it is collapsed by default, and a warning nobody opens is no
+            warning - three columns quietly say something else than they mean until the
+            next scrape has run. */}
+        {!me && (
+            <Alert severity="warning" sx={{ margin: "0 15px 10px" }}>
+                Noch ist kein Manager als 'du' markiert - das schreibt erst der nächste
+                Scrape-Lauf. Bis dahin zählst du bei 'Verdeckte Bieter' mit, obwohl der
+                Spaltenkopf dich ausnimmt; das Mindestgebot ist nicht auf dein eigenes Budget
+                begrenzt und erscheint auch auf deinen eigenen Listungen; und 'Zwangsverkauf
+                droht' kann auch deine eigenen Listungen markieren.
+            </Alert>
+        )}
         <Accordion disableGutters sx={{ margin: "0 15px 10px", backgroundColor: "transparent" }}>
             <AccordionSummary expandIcon={<ExpandMoreIcon />}>
                 <Typography>{summary}</Typography>
@@ -57,16 +73,6 @@ function ManagerStacks({ balances }) {
                 <Typography variant="body2" sx={{ opacity: 0.7, marginBottom: "12px" }}>
                     {ESTIMATE_NOTE} {CALIBRATION_NOTE}
                 </Typography>
-
-                {/* balances.json written before this feature carries no "isSelf", and
-                    guessing which manager is the user would be worse than saying so */}
-                {!me && (
-                    <Typography variant="body2" color="warning.main" sx={{ marginBottom: "12px" }}>
-                        Noch ist kein Manager als „du" markiert — das schreibt erst der nächste
-                        Scrape-Lauf. Bis dahin zählst du bei „Verdeckte Bieter" mit, und das
-                        Mindestgebot ist nicht auf dein eigenes Budget begrenzt.
-                    </Typography>
-                )}
 
                 <Box sx={{ display: "flex", alignItems: "center", gap: "10px", padding: "0 8px 4px" }}>
                     <Box sx={{ width: "28px", flexShrink: 0 }} />
@@ -148,6 +154,7 @@ function ManagerStacks({ balances }) {
                 ))}
             </AccordionDetails>
         </Accordion>
+        </>
     )
 }
 

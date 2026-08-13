@@ -224,6 +224,10 @@ export function affordableRivals(listing, balances, ownManagerId, { withBonuses 
  * `bid` is capped at the user's own ceiling so it stays a bid that can actually be
  * placed; `required` keeps the uncapped truth, and `exceedsBudget` marks the gap between
  * them. Without a known own ceiling nothing is capped and `ownMaxBid` stays null.
+ *
+ * On the user's own listing there is nothing to solve - you cannot bid on your own player.
+ * `isOwnListing` says so and every number stays null, rather than offering the richest
+ * manager's whole budget as a bid and then marking it unaffordable.
  */
 export function minWinningBid(listing, balances, ownManagerId, { withBonuses = true } = {}) {
     const rivals = affordableRivals(listing, balances, ownManagerId, { withBonuses })
@@ -234,17 +238,33 @@ export function minWinningBid(listing, balances, ownManagerId, { withBonuses = t
         : null
     const ownMaxBid = maxBidOf(own, withBonuses)
 
+    const nothingToSolve = { bid: null, required: null, isPhantom: false, exceedsBudget: false }
+
+    // Kickbase does not let anyone bid on their own listing, so the rival set is the list of
+    // possible buyers and there is no winning bid to name
+    if (own && listing && isSeller(own, listing))
+        return { ...nothingToSolve, isOwnListing: true, ownMaxBid, rivals }
+
     if (price === null)
-        return { bid: null, required: null, isPhantom: false, exceedsBudget: false, ownMaxBid, rivals }
+        return { ...nothingToSolve, isOwnListing: false, ownMaxBid, rivals }
 
     const required = rivals.length === 0 ? price : Math.max(price, rivals[0].maxBid + 1)
     const exceedsBudget = ownMaxBid !== null && required > ownMaxBid
 
+    // "Nobody can pay" is a claim about the league. Without managers to check it against -
+    // an empty balances.json, or a league of one - there is no claim to make.
+    const contenders = (Array.isArray(balances) ? balances : []).filter((manager) =>
+        !isMissing(manager?.userId)
+        && !isSeller(manager, listing)
+        && !sameId(manager.userId, ownManagerId)
+    ).length
+
     return {
         bid: exceedsBudget ? ownMaxBid : required,
         required,
-        isPhantom: rivals.length === 0,
+        isPhantom: rivals.length === 0 && contenders > 0,
         exceedsBudget,
+        isOwnListing: false,
         ownMaxBid,
         rivals
     }

@@ -341,6 +341,49 @@ describe("minWinningBid", () => {
         expect(minWinningBid(LISTING, BALANCES, OWN_ID).rivals.map((r) => r.username))
             .toEqual(["Anna", "Bernd"])
     })
+
+    // Listed by the user themselves. Kickbase does not let anyone bid on their own player,
+    // so there is no winning bid - and offering one would be worse than offering none: the
+    // number would be the richest manager's whole budget, marked as unaffordable.
+    const ownListing = { ...LISTING, seller: "shirazzi", sellerId: OWN_ID }
+
+    it("has no bid at all on the user's own listing", () => {
+        const solved = minWinningBid(ownListing, BALANCES, OWN_ID)
+        expect(solved.isOwnListing).toBe(true)
+        expect(solved.bid).toBeNull()
+        expect(solved.required).toBeNull()
+        // Not "you cannot afford it" - there is nothing to afford
+        expect(solved.exceedsBudget).toBe(false)
+        expect(solved.isPhantom).toBe(false)
+    })
+
+    it("still names who could buy the user's own listing", () => {
+        // The same set means something else here: these are the possible buyers
+        const solved = minWinningBid(ownListing, BALANCES, OWN_ID)
+        expect(solved.rivals.map((rival) => rival.username)).toEqual(["Verkäufer", "Anna", "Bernd"])
+    })
+
+    it("recognises the user's own listing by name where the seller id is missing", () => {
+        const { sellerId, ...older } = ownListing
+        expect(minWinningBid(older, BALANCES, OWN_ID).isOwnListing).toBe(true)
+    })
+
+    it("marks a foreign listing as foreign", () => {
+        expect(minWinningBid(LISTING, BALANCES, OWN_ID).isOwnListing).toBe(false)
+    })
+
+    it("does not claim a phantom auction when there is nobody to check against", () => {
+        // "Nobody can pay" is a claim about the league. An empty balances.json supports no
+        // claim at all, and a phantom badge there would invite a bid that loses.
+        expect(minWinningBid(LISTING, [], OWN_ID).isPhantom).toBe(false)
+        expect(minWinningBid(LISTING, null, OWN_ID).isPhantom).toBe(false)
+        // A league consisting of the seller and the user alone: no contenders either
+        expect(minWinningBid(LISTING, [BALANCES[3], BALANCES[4]], OWN_ID).isPhantom).toBe(false)
+    })
+
+    it("still claims a phantom auction when the managers exist and cannot pay", () => {
+        expect(minWinningBid({ ...LISTING, price: 31000000 }, BALANCES, OWN_ID).isPhantom).toBe(true)
+    })
 })
 
 describe("forcedSaleRisk", () => {

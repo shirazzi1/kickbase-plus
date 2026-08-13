@@ -45,8 +45,31 @@ describe("ManagerStacks", () => {
         // What balances.json looks like until a scrape has run with the flag in place
         render(<ManagerStacks balances={BALANCES.map(({ isSelf, ...rest }) => rest)} />)
 
-        expect(screen.getByText(/kein Manager als/)).toBeTruthy()
+        const warning = screen.getByText(/kein Manager als/)
+        expect(warning).toBeTruthy()
         expect(screen.getByText(/3 Manager nach geschätztem Maximalgebot/)).toBeTruthy()
+
+        // All three affected columns are named, since all three claim something else than
+        // they mean while the flag is missing
+        expect(warning.textContent).toMatch(/Verdeckte Bieter/)
+        expect(warning.textContent).toMatch(/Mindestgebot/)
+        expect(warning.textContent).toMatch(/Zwangsverkauf/)
+    })
+
+    it("puts that warning where it can be seen, not inside the collapsed panel", () => {
+        // It sat in the AccordionDetails once. The panel is collapsed by default, so the
+        // warning was in the DOM, counted as rendered by every test, and read by nobody.
+        render(<ManagerStacks balances={BALANCES.map(({ isSelf, ...rest }) => rest)} />)
+
+        const warning = screen.getByText(/kein Manager als/)
+        expect(warning.closest(".MuiCollapse-root")).toBeNull()
+        expect(warning.closest(".MuiAccordion-root")).toBeNull()
+    })
+
+    it("stays quiet once a manager is marked", () => {
+        render(<ManagerStacks balances={BALANCES} />)
+
+        expect(screen.queryByText(/kein Manager als/)).toBeNull()
     })
 
     it("renders nothing at all without balances", () => {

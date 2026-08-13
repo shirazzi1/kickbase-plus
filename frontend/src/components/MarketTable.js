@@ -182,32 +182,45 @@ function MarketTable() {
             renderCell: (params) => {
                 const solved = params.row.solved
 
+                // On your own listing there is no bid to place, so there is no number to
+                // show either. The 'Verdeckte Bieter' column still names who could buy.
+                if (solved.isOwnListing)
+                    return (
+                        <Tooltip title="Deine eigene Listung - auf eigene Spieler kann nicht geboten werden." arrow>
+                            <span style={{ opacity: 0.6 }}>eigene Listung</span>
+                        </Tooltip>
+                    )
+
                 if (params.value === null || params.value === undefined)
                     return "–"
 
                 // Who the bid has to beat, so the number reads as what it is instead of as
                 // a forecast. Kickbase never says who is bidding, so this is the set that
                 // could - not the set that does.
+                const others = solved.rivals.length - 1
                 const beats = solved.isPhantom
                     ? "Kein anderer Manager kann den Preis zahlen, der Preis selbst genügt."
                     : `Übertrifft ${solved.rivals[0].username} `
                         + `(max. ${currencyFormatter.format(solved.rivals[0].maxBid)})`
-                        + ` und ${solved.rivals.length - 1} weitere.`
+                        + (others > 0 ? ` und ${others} weitere.` : ".")
 
                 const capped = solved.exceedsBudget
                     ? ` Nötig wären ${currencyFormatter.format(solved.required)} - `
                         + `dein geschätztes Maximum sind ${currencyFormatter.format(solved.ownMaxBid)}.`
                     : ""
 
+                // Deliberately not red. On the real market 79 of 86 rows sit above the own
+                // ceiling, because outbidding the richest manager is out of reach almost
+                // everywhere - and a column that is red nine rows in ten reads as "you can
+                // buy nothing", which is the opposite of true. The marker says what the
+                // number is instead: your own limit, not the bid that wins.
                 return (
                     <Tooltip title={`${beats}${capped} ${ESTIMATE_NOTE}`} arrow>
                         <span>
-                            <span style={{ color: solved.exceedsBudget ? theme.palette.error.main : undefined }}>
-                                {currencyFormatter.format(params.value)}
-                            </span>
-                            {solved.isPhantom && (
+                            {currencyFormatter.format(params.value)}
+                            {(solved.exceedsBudget || solved.isPhantom) && (
                                 <Typography component="span" variant="body2" sx={{ opacity: 0.6, marginLeft: "6px" }}>
-                                    Phantom
+                                    {solved.exceedsBudget ? "dein Max." : "Phantom"}
                                 </Typography>
                             )}
                         </span>
@@ -315,21 +328,34 @@ function MarketTable() {
                 + "sind die Manager, die den Preis überhaupt zahlen könnten - der Verkäufer und "
                 + "du selbst ausgenommen. " + SOLVER_NOTE,
             renderCell: (params) => {
-                const rivals = params.row.solved.rivals
+                const solved = params.row.solved
+                const rivals = solved.rivals
 
-                if (rivals.length === 0)
+                if (rivals.length === 0) {
+                    // Three different reasons for a zero, and only one of them is a claim
+                    // about the league
+                    const why = solved.isOwnListing
+                        ? "Niemand in der Liga kann deinen Preis zahlen."
+                        : solved.isPhantom
+                            ? "Niemand außer dir kann den Preis zahlen."
+                            : "Keine Budgetdaten, also keine Aussage."
+
                     return (
-                        <Tooltip title={`Niemand außer dir kann den Preis zahlen. ${ESTIMATE_NOTE}`} arrow>
+                        <Tooltip title={`${why} ${ESTIMATE_NOTE}`} arrow>
                             <span>0</span>
                         </Tooltip>
                     )
+                }
 
                 const who = rivals
                     .map((rival) => `${rival.username} (max. ${currencyFormatter.format(rival.maxBid)})`)
                     .join(", ")
 
+                // On your own listing the same set is the list of possible buyers
+                const lead = solved.isOwnListing ? "Mögliche Käufer: " : ""
+
                 return (
-                    <Tooltip title={`${who}. ${ESTIMATE_NOTE}`} arrow>
+                    <Tooltip title={`${lead}${who}. ${ESTIMATE_NOTE}`} arrow>
                         <span>{rivals.length}</span>
                     </Tooltip>
                 )
@@ -362,7 +388,7 @@ function MarketTable() {
                 if (!tier)
                     return "–"
 
-                const title = `${risk.seller} steht ${currencyFormatter.format(-risk.deficit)} im Minus `
+                const title = `${risk.seller} steht ${currencyFormatter.format(risk.deficit)} im Minus `
                     + `und hat davon ${unsignedPercentFormatter.format(risk.overdraftUsed)} seines erlaubten `
                     + `Dispos verbraucht - es bleiben ${currencyFormatter.format(risk.headroom)}. `
                     + `Die Listung läuft seit ${formatDuration(risk.ageHours * 60 * 60 * 1000)} `
