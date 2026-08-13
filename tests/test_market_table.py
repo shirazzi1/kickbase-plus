@@ -52,6 +52,40 @@ def history(*values):
     return [{"dt": 20000 + i, "mv": mv} for i, mv in enumerate(values)]
 
 
+def set_bep_days(growth, target):
+    """Set or clear the two horizon variables."""
+    from os import environ
+    for name, value in (("BEP_GROWTH_DAYS", growth), ("BEP_TARGET_DAYS", target)):
+        if value is None:
+            environ.pop(name, None)
+        else:
+            environ[name] = value
+
+
+def run_main_config_write():
+    """Call the config writer with DATA_DIR redirected, and return what it wrote."""
+    import json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        data_dir = path.join(tmp, "data")
+        ts_dir = path.join(data_dir, "timestamps")
+        from os import makedirs
+        makedirs(ts_dir, exist_ok=True)
+
+        import main
+
+        original = (miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR)
+        miscellaneous.DATA_DIR = data_dir
+        miscellaneous.TIMESTAMP_DIR = ts_dir
+        try:
+            main.write_bep_config()
+            with open(path.join(data_dir, "config.json")) as f:
+                return json.load(f)
+        finally:
+            miscellaneous.DATA_DIR, miscellaneous.TIMESTAMP_DIR = original
+
+
 ### ===============================================================================
 ### market_value_deltas()
 ### ===============================================================================
@@ -259,7 +293,11 @@ def run_market():
         try:
             leagues.get_market = lambda token, lid: [Market_Players(p) for p in market_items]
             leagues.player_statistics = lambda token, lid, pid: stats_by_id.get(str(pid), {"i": str(pid), "st": 0})
-            leagues.player_marketvalue = lambda token, pid: history(1000, 1200, 1500, 1900)
+            ### 9 entries, uneven and partly falling before the last four settle into the
+            ### 1000/1200/1500/1900 run the delta tests below depend on. The extra length
+            ### lets a 7 day growth window (unlike the 3 day default) actually resolve.
+            leagues.player_marketvalue = lambda token, pid: history(
+                1400, 1300, 1500, 1250, 1600, 1000, 1200, 1500, 1900)
 
             class FakeLeague:
                 id = LEAGUE_ID
@@ -328,7 +366,7 @@ def test_deltas_are_attached_to_every_row():
         assert row["today"] == 400, f"{name}: expected today 400, got {row['today']}"
         assert row["yesterday"] == 300, f"{name}: expected yesterday 300, got {row['yesterday']}"
         assert row["twoDays"] == 200, f"{name}: expected twoDays 200, got {row['twoDays']}"
-        assert row["sevenDaysAvg"] is None, f"{name}: 4 entries cannot span 7 days"
+        assert row["sevenDaysAvg"] == 600, f"{name}: expected sevenDaysAvg 600, got {row['sevenDaysAvg']}"
 
 
 def test_trend_is_gone():
@@ -361,6 +399,83 @@ def test_expiration_sorts_chronologically_as_a_string():
     earlier = rows["Musah"]["expiration"]   ### exs 3915
     later = rows["Gouweleeuw"]["expiration"]  ### exs 13315
     assert earlier < later, f"{earlier!r} should sort before {later!r}"
+
+
+### ===============================================================================
+### The fields the bid field needs
+### ===============================================================================
+
+
+def test_every_row_carries_the_player_id():
+    """Without it a row cannot be addressed, so no bid can name a player."""
+    rows = run_market()
+    for name, row in rows.items():
+        assert row.get("playerId"), f"row without a playerId: {row}"
+    ### The ids are the "i" values from the market items
+    assert {row["playerId"] for row in rows.values()} >= {"8289", "3754", "49"}, \
+        f"expected the fixture player ids, got {[row['playerId'] for row in rows.values()]}"
+
+
+def test_own_listing_is_flagged():
+    """You cannot bid on a player you listed yourself, so the cell has to know."""
+    rows = run_market()
+    ### Ginter is listed by OWN_USER_ID in the fixtures
+    assert rows["Ginter"]["isOwnListing"] is True, "expected Ginter flagged as an own listing"
+
+
+def test_foreign_and_kickbase_listings_are_not_flagged():
+    rows = run_market()
+    assert rows["Musah"]["isOwnListing"] is False, "expected a foreign listing unflagged"
+    for name, row in rows.items():
+        if row["isFreeAgent"]:
+            assert row["isOwnListing"] is False, \
+                f"a Kickbase listing is nobody's own listing: {name}"
+
+
+def test_rows_carry_the_averaged_growth():
+    rows = run_market()
+    for name, row in rows.items():
+        growth = row["avgDailyGrowth"]
+        assert growth is None or isinstance(growth, (int, float)), \
+            f"expected a number or None for {name}, got {growth!r}"
+
+
+def test_the_growth_matches_the_three_day_deltas_at_the_default():
+    """The same telescoping identity, now through market() itself."""
+    set_bep_days(None, None)
+    rows = run_market()
+    for name, row in rows.items():
+        if row["avgDailyGrowth"] is None:
+            continue
+        deltas = (row["today"], row["yesterday"], row["twoDays"])
+        if any(delta is None for delta in deltas):
+            continue
+        expected = sum(deltas) / 3
+        assert row["avgDailyGrowth"] == expected, \
+            f"{name}: expected {expected}, got {row['avgDailyGrowth']}"
+
+
+def test_a_wider_window_changes_the_growth():
+    """Proves the env variable actually reaches market(), not just get_bep_days()."""
+    set_bep_days("3", "3")
+    narrow = {name: row["avgDailyGrowth"] for name, row in run_market().items()}
+    set_bep_days("7", "3")
+    wide = {name: row["avgDailyGrowth"] for name, row in run_market().items()}
+    set_bep_days(None, None)
+
+    differing = [name for name in narrow
+                 if narrow[name] is not None and wide.get(name) is not None
+                 and narrow[name] != wide[name]]
+    assert differing, \
+        f"expected at least one player's growth to change with the window, got {narrow} vs {wide}"
+
+
+def test_config_json_is_written_with_both_horizons():
+    set_bep_days("7", "14")
+    config = run_main_config_write()
+    set_bep_days(None, None)
+    assert config == {"bepGrowthDays": 7, "bepTargetDays": 14}, \
+        f"expected both horizons in config.json, got {config}"
 
 
 ### ===============================================================================
@@ -399,6 +514,15 @@ if __name__ == "__main__":
     check("trend is gone", test_trend_is_gone)
     check("expiration is ISO for free agents, None for user listings", test_expiration_is_iso_for_free_agents_and_none_for_user_listings)
     check("expiration sorts chronologically as a string", test_expiration_sorts_chronologically_as_a_string)
+
+    print("\nthe fields the bid field needs")
+    check("every row carries the player id", test_every_row_carries_the_player_id)
+    check("own listing is flagged", test_own_listing_is_flagged)
+    check("foreign and Kickbase listings are not flagged", test_foreign_and_kickbase_listings_are_not_flagged)
+    check("rows carry the averaged growth", test_rows_carry_the_averaged_growth)
+    check("the growth matches the three day deltas at the default", test_the_growth_matches_the_three_day_deltas_at_the_default)
+    check("a wider window changes the growth", test_a_wider_window_changes_the_growth)
+    check("config.json is written with both horizons", test_config_json_is_written_with_both_horizons)
 
     total, passed = len(PASSED), sum(PASSED)
     print(f"\n{passed}/{total} passed")
